@@ -1,24 +1,16 @@
 import "pixi.js/prepare";
-import { Application, Container, Graphics, Sprite, Texture } from "pixi.js";
+import { Application, Container, Sprite, Texture } from "pixi.js";
 import { BeatClock } from "./BeatClock";
+import { CueEngine, type SecretLane } from "./cues/CueEngine";
 import { playEffect, type EffectHost } from "./effects";
 import { InputRouter } from "./InputRouter";
-import { createEmptySlot, type Slot } from "./models/Slot";
+import { SlotStore } from "./media/SlotStore";
+import { StageRenderer } from "./rendering/StageRenderer";
 import { AnimationScheduler } from "./services/AnimationScheduler";
-import { AudioManager } from "./services/AudioManager";
-import { CueRecorder } from "./services/CueRecorder";
-import {
-  createPanelPreview,
-  getGifFrameDurationMs,
-  loadImageFile,
-} from "./services/ImageLoader";
-import { EFFECT_LABELS, EFFECTS, type AppAction, type EffectId, type Quantize } from "./types";
-import {
-  createVjUi,
-  queryRequired,
-} from "./ui/createVjUi";
-
-const RECORD_BEATS = 8;
+import { createPanelPreview } from "./services/ImageLoader";
+import { EFFECTS, type AppAction, type EffectId } from "./types";
+import { queryRequired } from "./ui/createVjUi";
+import { VjUiController } from "./ui/VjUiController";
 
 export class VJApp implements EffectHost {
   readonly app = new Application();
@@ -29,56 +21,38 @@ export class VJApp implements EffectHost {
   width = 1280;
   height = 720;
 
-  private backgroundLayer = new Container();
-  private ambientLayer = new Container();
-  private latchedLayer = new Container();
   private activeActor: Sprite | null = null;
-  private ambientActor: Sprite | null = null;
-  private latchedActors = new Map<number, Sprite>();
-  private persistentBackgroundCharacters: Array<{
-    sprite: Sprite;
-    slot: number;
-    seed: number;
-    size: number;
-    flip: number;
-    alpha: number;
-  }> = [];
   private characterPresenceUntil = 0;
-  private slots: Slot[] = Array.from({ length: 8 }, () => createEmptySlot());
-  private commonTransform = { scale: 1, anchorX: 0.5, anchorY: 0.5 };
+  private slotStore = new SlotStore(8);
   private selectedSlot = 0;
   private activeSlot: number | null = null;
-  private quantize: Quantize = "1/8";
   private clock = new BeatClock();
+  private stageRenderer = new StageRenderer(this.slotStore, this.clock);
+  private cueEngine = new CueEngine(this.clock, {
+    hasCue: (cue) => this.slotStore.hasCue(cue),
+    hasImage: (slot) => this.slotStore.hasImage(slot),
+    randomImageSlot: () => this.slotStore.randomImageSlot(),
+    playCue: (cue, strength) => this.playCueNow(cue, strength),
+    playSecret: (slot, lane) => this.playSecretNow(slot, lane),
+    playLatchedPulse: (cue, strength, wholeBeat) => this.playLatchedPulse(cue, strength, wholeBeat),
+    immediateFeedback: (effect) => this.immediateFeedback(effect),
+    flash: (amount) => this.flash(amount),
+    setLatchVisual: (cue, active) => this.setLatchVisual(cue, active),
+    onRecordStateChange: () => this.updateRecordButton(),
+    onClear: () => this.handleClearAction(),
+    log: (message) => this.logAction(message),
+  });
   private router = new InputRouter((action) => this.handleAction(action));
   private animation = new AnimationScheduler();
-  private audio = new AudioManager();
+  private uiController!: VjUiController;
   private panel!: HTMLElement;
   private slotElements: HTMLElement[] = [];
-  private hud!: HTMLElement;
-  private beatPulse!: HTMLElement;
-  private flashElement!: HTMLElement;
-  private backgroundShapes: Graphics[] = [];
-  private heldInputs = new Map<string, { cue: number; strength: number; startedMs: number; lastBeat: number }>();
-  private latchedCues = new Map<number, { strength: number; lastBeat: number }>();
   private cueButtons: HTMLButtonElement[] = [];
-  private recorder = new CueRecorder(RECORD_BEATS);
-  private recordButton!: HTMLButtonElement;
-  private bpmGraphPath!: SVGPathElement;
-  private bpmGraphValue!: HTMLElement;
-  private bpmHistory: Array<{ time: number; bpm: number }> = [{ time: performance.now(), bpm: 128 }];
-  private lastBpmSample = 0;
-  private actionLog!: HTMLElement;
   private keyGuide!: HTMLElement;
   private virtualShift = false;
-  private actionMessages: string[] = [];
   private resetGeneration = 0;
   private fxPool: Sprite[] = [];
-  private backgroundCharacterPool: Sprite[] = [];
-  private resolvedTransforms = Array.from({ length: 8 }, () => ({ scale: 1, anchorX: 0.5, anchorY: 0.5 }));
-  private fitScales = Array.from({ length: 8 }, () => 1);
   private lastHudUpdate = 0;
-  private lastHudHtml = "";
   private limitFps60 = false;
   private hideBackground = false;
   private skipAssign = false;
@@ -89,9 +63,25 @@ export class VJApp implements EffectHost {
   private nextPendingAssignmentId = 1;
   private panelWasHiddenBeforeAssign = false;
   private dropOverlaySuppressed = false;
+  private lifecycleAbort = new AbortController();
+  private initialized = false;
+
+  /** Pixiのフレーム更新を各責務へ振り分ける */
+  private onTick = (): void => {
+    const now = performance.now();
+    this.router.pollGamepads();
+    this.updateAnimatedGifs(now);
+    this.animation.update(now);
+    this.cueEngine.update(now);
+    this.stageRenderer.update(now, this.activeSlot, this.characterPresenceUntil, this.cueEngine.latchedCueNumbers());
+    this.updateBpmGraph(now);
+    this.updateHud(now);
+    if (this.activeActor && now > this.characterPresenceUntil) this.activeActor.visible = false;
+  };
 
   /** PixiJSとUIと入力監視を初期化する */
   async init(host: HTMLElement): Promise<void> {
+    if (this.initialized) return;
     await this.app.init({
       resizeTo: window,
       backgroundAlpha: 0,
@@ -104,33 +94,40 @@ export class VJApp implements EffectHost {
     this.app.canvas.id = "vj-canvas";
     host.appendChild(this.app.canvas);
     this.app.stage.addChild(this.root);
-    this.root.addChild(this.ambientLayer, this.backgroundLayer, this.fxLayer, this.latchedLayer, this.actorLayer, this.secretLayer);
-    this.refreshTransforms();
-
-    this.createBackground();
+    this.root.addChild(
+      this.stageRenderer.ambientLayer,
+      this.stageRenderer.backgroundLayer,
+      this.fxLayer,
+      this.stageRenderer.latchedLayer,
+      this.actorLayer,
+      this.secretLayer,
+    );
     this.createUi(host);
     this.resize();
-    window.addEventListener("resize", () => this.resize());
+    window.addEventListener("resize", () => this.resize(), { signal: this.lifecycleAbort.signal });
     this.setupDrop(host);
     this.router.start();
 
     // 入力や音声や拍は実時間基準なので通常は描画上限を設けず必要時だけ60 FPSへ制限する
     this.app.ticker.maxFPS = 0;
-    this.app.ticker.add(() => {
-      const now = performance.now();
-      this.router.pollGamepads();
-      this.updateAnimatedGifs(now);
-      this.animation.update(now);
-      this.updateAutoHold(now);
-      this.updateRecording(now);
-      this.updateLoop(now);
-      this.updateBackground(now);
-      this.updateAmbient(now);
-      this.updateLatchedActors(now);
-      this.updateBpmGraph(now);
-      this.updateHud(now);
-      if (this.activeActor && now > this.characterPresenceUntil) this.activeActor.visible = false;
-    });
+    this.app.ticker.add(this.onTick);
+    this.initialized = true;
+  }
+
+  /** 入力監視とタイマーとDOMとメディアとPixiリソースを解放する */
+  destroy(): void {
+    if (!this.initialized) return;
+    this.initialized = false;
+    this.lifecycleAbort.abort();
+    this.router.destroy();
+    this.app.ticker.remove(this.onTick);
+    this.animation.clear();
+    this.cueEngine.destroy();
+    this.stageRenderer.destroy();
+    this.slotStore.destroy();
+    this.uiController.destroy();
+    this.app.destroy({ removeView: true }, { children: true });
+    this.fxPool = [];
   }
 
   /** 演出対象のアクターを返す */
@@ -145,30 +142,7 @@ export class VJApp implements EffectHost {
 
   /** 指定スロットの確定済み表示変形を返す */
   private transformFor(index: number): { scale: number; anchorX: number; anchorY: number } {
-    return this.resolvedTransforms[index] ?? this.resolvedTransforms[0];
-  }
-
-  /** 共通値とスロット別補正から各表示変形を再計算する */
-  private refreshTransforms(): void {
-    for (let index = 0; index < this.slots.length; index += 1) {
-      const slot = this.slots[index];
-      const resolved = this.resolvedTransforms[index];
-      // 完全な画面外化や極端な拡大を避けライブ中に復帰できる範囲へ制限する
-      resolved.scale = Math.max(0.35, Math.min(2.5, this.commonTransform.scale + slot.scaleOffset));
-      resolved.anchorX = Math.max(0.15, Math.min(0.85, this.commonTransform.anchorX + slot.anchorXOffset));
-      resolved.anchorY = Math.max(0.15, Math.min(0.85, this.commonTransform.anchorY + slot.anchorYOffset));
-    }
-  }
-
-  /** 各画像が画面内へ収まる基準スケールを再計算する */
-  private refreshFitScales(): void {
-    for (let index = 0; index < this.slots.length; index += 1) {
-      const texture = this.slots[index].texture;
-      this.fitScales[index] = texture
-        // 端へ密着すると動きが見切れるため6%の余白を残す
-        ? Math.min(this.width / Math.max(1, texture.width), this.height / Math.max(1, texture.height)) * 0.94
-        : 1;
-    }
+    return this.slotStore.transformFor(index);
   }
 
   /** 画面サイズとDPRから負荷を抑えた描画解像度を決める */
@@ -183,35 +157,14 @@ export class VJApp implements EffectHost {
 
   /** 直近8件の操作ログを新しいほど濃く表示する */
   private logAction(message: string): void {
-    this.actionMessages.push(message);
-    if (this.actionMessages.length > 8) this.actionMessages.shift();
-    if (!this.actionLog) return;
-    // 操作のたびにDOMを増減させず固定行を再利用する
-    while (this.actionLog.children.length < 8) {
-      const row = document.createElement("div");
-      row.className = "action-log-entry";
-      this.actionLog.appendChild(row);
-    }
-    const rows = this.actionLog.children;
-    const empty = 8 - this.actionMessages.length;
-    for (let index = 0; index < 8; index += 1) {
-      const row = rows[index] as HTMLElement;
-      const messageIndex = index - empty;
-      if (messageIndex < 0) {
-        row.textContent = "";
-        row.style.opacity = "0";
-        continue;
-      }
-      row.textContent = this.actionMessages[messageIndex];
-      row.style.opacity = String(0.16 + 0.84 * ((messageIndex + 1) / this.actionMessages.length));
-    }
+    this.uiController?.log(message);
   }
 
   /** 現在アクターの画面座標と表示スケールを返す */
   getActorPlacement(): { x: number; y: number; scale: number } {
     const index = this.activeSlot ?? this.selectedSlot;
     const transform = this.transformFor(index);
-    const fit = this.fitScales[index] ?? 1;
+    const fit = this.slotStore.fitScaleFor(index);
     return {
       x: this.width * transform.anchorX,
       y: this.height * transform.anchorY,
@@ -221,7 +174,7 @@ export class VJApp implements EffectHost {
 
   /** 残像用に現在キャラクターのスプライトを借りて配置する */
   cloneCharacter(alpha = 1): Sprite | null {
-    const slot = this.activeSlot === null ? null : this.slots[this.activeSlot];
+    const slot = this.activeSlot === null ? null : this.slotStore.get(this.activeSlot);
     if (!slot?.texture) return null;
     const sprite = this.acquireFxSprite(slot.texture);
     const placement = this.getActorPlacement();
@@ -295,161 +248,60 @@ export class VJApp implements EffectHost {
 
   /** 画面を瞬時に明るくしてフェードアウトさせる */
   flash(amount = 0.55): void {
-    this.flashElement.style.opacity = String(Math.min(0.9, amount));
-    // 不透明状態を一度描画してから遷移を付けないとフェードが開始されない
-    requestAnimationFrame(() => {
-      this.flashElement.style.transition = "opacity 180ms ease-out";
-      this.flashElement.style.opacity = "0";
-      window.setTimeout(() => { this.flashElement.style.transition = "none"; }, 200);
-    });
+    this.uiController.flash(amount);
   }
 
   /** 音声ファイルをデコードして指定スロットへ割り当てる */
   private async assignAudioFile(index: number, file: File): Promise<void> {
     if (!file.type.startsWith("audio/")) return;
-    const decoded = await this.audio.decode(file);
-    const slot = this.slots[index];
-    slot.audioBuffer = decoded.buffer;
-    slot.audioName = decoded.name;
-    slot.audioStart = decoded.start;
-    slot.audioDuration = decoded.duration;
+    const assignment = await this.slotStore.assignAudio(index, file);
     const el = this.slotElements[index];
     const audioLabel = el.querySelector<HTMLElement>("[data-audio]");
     if (audioLabel) audioLabel.textContent = `SFX ${file.name.replace(/\.[^.]+$/, "").slice(0, 10)}`;
-    this.logAction(`SFX ${index + 1} ${file.name} / TRIM ${Math.round(decoded.trimmedMs)}ms`);
+    this.logAction(`SFX ${index + 1} ${assignment.name} / TRIM ${Math.round(assignment.trimmedMs)}ms`);
   }
 
   /** 指定スロットのトリム済み音声を入力強度に応じて再生する */
   private playCueAudio(index: number, strength = 1): void {
-    const slot = this.slots[index];
-    if (!slot?.audioBuffer || slot.audioDuration <= 0) return;
-    this.audio.play({
-      buffer: slot.audioBuffer,
-      start: slot.audioStart,
-      duration: slot.audioDuration,
-    }, strength);
+    this.slotStore.playAudio(index, strength);
   }
 
   /** 共通入力アクションを解除やラッチやキュー発火へ振り分ける */
   private handleAction(action: AppAction): void {
-    if (action.type === "clear") {
-      if (!this.assignOverlay.hidden) {
-        const remaining = this.pendingAssignments.length;
-        this.closeAssignOverlay(true);
-        this.logAction(`D&D ASSIGN CONFIRM${remaining ? ` / SKIP ${remaining}` : ""}`);
-        return;
-      }
-      this.clearAllAnimations();
-      return;
-    }
-    if (action.phase === "up") {
-      this.heldInputs.delete(action.sourceId);
-      return;
-    }
-
-    if (action.latchToggle) {
-      this.toggleLatch(action.cue, action.strength);
-      return;
-    }
-
-    // 同じ物理入力の重複downを無視して長押し状態を一つに保つ
-    if (this.heldInputs.has(action.sourceId)) return;
-    this.audio.resume();
-    if (action.cue === 8 && this.randomLoadedSlot() === null) return;
-    if (action.cue !== 8 && !this.slots[action.cue]?.texture && !this.slots[action.cue]?.audioBuffer) return;
-
-    this.heldInputs.set(action.sourceId, {
-      cue: action.cue,
-      strength: action.strength,
-      startedMs: performance.now(),
-      lastBeat: Math.floor(this.clock.beatAt()),
-    });
-
-    if (action.cue === 8) this.triggerSecretCue();
-    else this.triggerCue(action.cue, action.strength);
-  }
-
-  /** 入力フィードバックを即時表示してキューを拍境界へ予約する */
-  private triggerCue(cue: number, strength = 1, shouldLog = true): void {
-    if (!this.slots[cue]?.texture && !this.slots[cue]?.audioBuffer) return;
-    this.audio.resume();
-    const effect = EFFECTS[cue];
-    if (shouldLog) this.logAction(`CUE ${cue + 1} ${EFFECT_LABELS[effect]}`);
-    this.immediateFeedback(effect);
-    const now = performance.now();
-    const target = this.clock.nextBoundary(now, this.quantize);
-    const delay = Math.max(0, target - now);
-    // タイマー精度以下の待機は遅延だけを増やすため即時発火する
-    if (delay < 8) {
-      this.playCueNow(cue, strength);
-      return;
-    }
-    this.schedule(() => this.playCueNow(cue, strength), delay);
+    this.slotStore.resumeAudio();
+    this.cueEngine.handleAction(action);
   }
 
   /** キューの音声と画像演出を実際に再生する */
-  private playCueNow(cue: number, strength = 1, allowRecord = true): void {
+  private playCueNow(cue: number, strength = 1): void {
     const effect = EFFECTS[cue];
-    const slot = this.slots[cue];
+    const slot = this.slotStore.get(cue);
     if (!effect || (!slot?.texture && !slot?.audioBuffer)) return;
-    if (this.recorder.isRecording && allowRecord) this.recordCue(cue, strength);
-    if (slot.isGif) slot.gifActiveUntil = Math.max(slot.gifActiveUntil ?? 0, performance.now() + 900);
+    this.slotStore.activateGif(cue, performance.now() + 900);
     this.playCueAudio(cue, strength);
     if (!slot.texture || !this.activateSlot(cue)) return;
-    this.setAmbientSlot(cue);
-    this.seedBackgroundCharacters(cue);
+    this.stageRenderer.setAmbientSlot(cue);
+    this.stageRenderer.seedBackgroundCharacters(cue);
     playEffect(effect, this, strength);
     this.characterPresenceUntil = performance.now() + 720;
-  }
-
-  /** 画像読み込み済みスロットを偏りなく一つ選ぶ */
-  private randomLoadedSlot(): number | null {
-    let count = 0;
-    for (const slot of this.slots) if (slot.texture) count += 1;
-    if (!count) return null;
-    let pick = Math.floor(Math.random() * count);
-    for (let index = 0; index < this.slots.length; index += 1) {
-      if (!this.slots[index].texture) continue;
-      if (pick === 0) return index;
-      pick -= 1;
-    }
-    return null;
-  }
-
-  /** ランダム画像を選び9番演出を拍境界へ予約する */
-  private triggerSecretCue(): void {
-    const slot = this.randomLoadedSlot();
-    if (slot == null || !this.slots[slot]?.texture) return;
-    this.logAction(`9 GRAVITY / RANDOM CUE ${slot + 1}`);
-    this.immediateFeedback("jump");
-    const now = performance.now();
-    const target = this.clock.nextBoundary(now, this.quantize);
-    const delay = Math.max(0, target - now);
-    if (delay < 8) {
-      this.playSecretNow(slot);
-      return;
-    }
-    this.schedule(() => this.playSecretNow(slot), delay);
   }
 
   /** 9番のGRAVITY演出を指定スロットで再生する */
   private playSecretNow(
     slot: number,
-    allowRecord = true,
-    lane?: { column: number; count: number },
+    lane?: SecretLane,
   ): void {
-    const texture = this.slots[slot]?.texture;
+    const texture = this.slotStore.get(slot).texture;
     if (!texture) return;
     this.activeSlot = slot;
-    this.setAmbientSlot(slot);
-    this.seedBackgroundCharacters(slot);
-    if (this.recorder.isRecording && allowRecord) this.recordCue(8, 1, slot);
+    this.stageRenderer.setAmbientSlot(slot);
+    this.stageRenderer.seedBackgroundCharacters(slot);
 
     const sprite = this.acquireFxSprite(texture);
     // 9番演出を通常アクターやラッチ列や他の演出より常に前面へ出す
     this.secretLayer.addChild(sprite);
     const transform = this.transformFor(slot);
-    const fit = this.fitScales[slot];
+    const fit = this.slotStore.fitScaleFor(slot);
     const baseScale = fit * transform.scale * 1.5;
     const laneCount = Math.max(1, lane?.count ?? 1);
     const laneColumn = Math.max(0, Math.min(laneCount - 1, lane?.column ?? 0));
@@ -471,8 +323,7 @@ export class VJApp implements EffectHost {
 
     const start = performance.now();
     const duration = this.clock.msPerBeat;
-    const gifSlot = this.slots[slot];
-    if (gifSlot.isGif) gifSlot.gifActiveUntil = Math.max(gifSlot.gifActiveUntil ?? 0, start + duration + 100);
+    this.slotStore.activateGif(slot, start + duration + 100);
     this.characterPresenceUntil = Math.max(this.characterPresenceUntil, start + duration);
     this.animate(duration, (t) => {
       // 同じ放物線を時間変換してゆっくり上昇し素早く落下する重さを作る
@@ -498,198 +349,51 @@ export class VJApp implements EffectHost {
     }, () => this.releaseFxSprite(sprite), () => !sprite.destroyed);
   }
 
-  /** 録音開始からの相対拍位置へキューを記録する */
-  private recordCue(cue: number, strength = 1, slot?: number): void {
-    this.recorder.record(cue, this.clock.beatAt(), strength, slot);
-  }
-
-  /** 長押しとラッチ中のキューを拍ごとに自動発火する */
-  private updateAutoHold(now: number): void {
-    const wholeBeat = Math.floor(this.clock.beatAt(now) + 1e-6);
-    for (const held of this.heldInputs.values()) {
-      if (this.latchedCues.has(held.cue)) continue;
-      if (wholeBeat < held.lastBeat) {
-        held.lastBeat = wholeBeat;
-        continue;
-      }
-      // 短い通常タップを長押しと誤認しないよう220ms待つ
-      if (now - held.startedMs < 220) continue;
-      if (wholeBeat > held.lastBeat) {
-        held.lastBeat = wholeBeat;
-        if (held.cue === 8) {
-          const slot = this.randomLoadedSlot();
-          if (slot !== null) {
-            this.immediateFeedback("jump");
-            this.logAction(`HOLD AUTO 9 / RANDOM CUE ${slot + 1}`);
-            this.playSecretNow(slot);
-          }
-        } else {
-          this.immediateFeedback(EFFECTS[held.cue]);
-          this.logAction(`HOLD AUTO ${held.cue + 1}`);
-          this.playCueNow(held.cue, held.strength);
-        }
-      }
-    }
-
-    for (const [cue, latched] of this.latchedCues) {
-      if (wholeBeat < latched.lastBeat) {
-        latched.lastBeat = wholeBeat;
-        continue;
-      }
-      if (wholeBeat > latched.lastBeat) {
-        latched.lastBeat = wholeBeat;
-        if (cue === 8) {
-          const slot = this.randomLoadedSlot();
-          if (slot !== null) {
-            const order = [...this.latchedCues.keys()].slice(0, 4);
-            const column = Math.max(0, order.indexOf(8));
-            this.immediateFeedback("jump");
-            this.logAction(`SHIFT AUTO 9 / RANDOM CUE ${slot + 1}`);
-            this.playSecretNow(slot, true, { column, count: order.length });
-          }
-          continue;
-        }
-        this.immediateFeedback(EFFECTS[cue]);
-        this.logAction(`SHIFT AUTO ${cue + 1}`);
-        if (this.recorder.isRecording) this.recordCue(cue, latched.strength);
-        this.playCueAudio(cue, latched.strength);
-        this.seedBackgroundCharacters(cue);
-        if (cue === 3) this.shake(10 * latched.strength, 150);
-        else if (cue === 7 && wholeBeat % 2 === 0) this.flash(0.18);
-      }
-    }
-  }
-
-  /** 指定キューの拍同期ラッチを切り替える */
-  private toggleLatch(cue: number, strength = 1): void {
-    const slot = cue === 8 ? null : this.slots[cue];
-    if (cue === 8 ? this.randomLoadedSlot() === null : (!slot?.texture && !slot?.audioBuffer)) return;
-    this.audio.resume();
-    if (this.latchedCues.has(cue)) {
-      this.latchedCues.delete(cue);
-      this.logAction(`SHIFT AUTO ${cue + 1} OFF`);
-      const sprite = this.latchedActors.get(cue);
-      if (sprite && !sprite.destroyed) sprite.destroy();
-      this.latchedActors.delete(cue);
-    } else {
-      // 画面分割と同時描画負荷を予測可能に保つため4列までに制限する
-      if (this.latchedCues.size >= 4) {
-        this.immediateFeedback(cue === 8 ? "jump" : EFFECTS[cue]);
-        this.flash(0.16);
-        this.logAction("SHIFT AUTO LIMIT 4");
-        return;
-      }
-      this.latchedCues.set(cue, {
-        strength,
-        lastBeat: Math.floor(this.clock.beatAt()),
-      });
-      this.logAction(`SHIFT AUTO ${cue + 1} ON`);
-      if (cue === 8) {
-        const slot = this.randomLoadedSlot();
-        if (slot !== null) {
-          const order = [...this.latchedCues.keys()].slice(0, 4);
-          this.immediateFeedback("jump");
-          this.playSecretNow(slot, true, { column: order.indexOf(8), count: order.length });
-        }
-      } else {
-        if (slot?.texture) {
-          const sprite = new Sprite(slot.texture);
-          sprite.anchor.set(0.5);
-          sprite.alpha = 0.96;
-          this.latchedLayer.addChild(sprite);
-          this.latchedActors.set(cue, sprite);
-        }
-        this.triggerCue(cue, strength, false);
-      }
-    }
-    this.updateLatchUi();
-  }
-
-  /** ラッチ状態をキューボタンの見た目へ反映する */
-  private updateLatchUi(): void {
-    this.cueButtons.forEach((button, cue) => button.classList.toggle("latched", this.latchedCues.has(cue)));
-  }
-
-  /** 2小節録音の開始または終了を切り替える */
-  private toggleRecord(): void {
-    const beat = this.clock.beatAt();
-    if (this.recorder.isRecording) {
-      this.recorder.stop(beat);
-      this.handleRecordStopped();
-      return;
-    }
-    this.recorder.start(beat);
-    this.updateRecordButton();
-    this.logAction("REC START / 2 BARS");
-  }
-
-  /** 録音終了をボタンと操作ログへ反映する */
-  private handleRecordStopped(): void {
-    this.updateRecordButton();
-    this.logAction(this.recorder.isLooping ? "REC END → LOOP 2 BARS" : "REC END / EMPTY");
-  }
-
-  /** 規定の8拍へ到達した録音を自動終了する */
-  private updateRecording(now: number): void {
-    if (this.recorder.finishIfNeeded(this.clock.beatAt(now))) this.handleRecordStopped();
-  }
-
   /** 録音とループ状態を操作ボタンへ反映する */
   private updateRecordButton(): void {
-    if (!this.recordButton) return;
-    this.recordButton.classList.toggle("recording", this.recorder.isRecording);
-    this.recordButton.textContent = this.recorder.isRecording
-      ? "● REC 2 BARS [R]"
-      : this.recorder.isLooping
-        ? "LOOP 2 BARS [R]"
-        : "REC [R]";
+    this.uiController?.setRecordState(this.cueEngine.isRecording, this.cueEngine.isLooping);
   }
 
-  /** 前回更新から現在までに跨いだ録音イベントを再生する */
-  private updateLoop(now: number): void {
-    for (const event of this.recorder.collectDueEvents(this.clock.beatAt(now))) {
-      if (event.cue === 8) {
-        this.immediateFeedback("pop");
-        this.logAction("LOOP 9 GRAVITY");
-        this.playSecretNow(event.slot ?? this.selectedSlot, false);
-      } else {
-        this.immediateFeedback(EFFECTS[event.cue]);
-        this.logAction(`LOOP ${event.cue + 1}`);
-        this.playCueNow(event.cue, event.strength, false);
-      }
+  /** 録音操作をキューエンジンへ委譲する */
+  private toggleRecord(): void {
+    this.cueEngine.toggleRecord();
+  }
+
+  /** ラッチ表示スプライトとキューボタンの状態を更新する */
+  private setLatchVisual(cue: number, active: boolean): void {
+    this.stageRenderer.setLatchVisual(cue, active);
+    this.uiController?.setLatchState(cue, active);
+  }
+
+  /** ラッチ拍で音声と背景補助演出を再生する */
+  private playLatchedPulse(cue: number, strength: number, wholeBeat: number): void {
+    this.playCueAudio(cue, strength);
+    this.stageRenderer.seedBackgroundCharacters(cue);
+    if (cue === 3) this.shake(10 * strength, 150);
+    else if (cue === 7 && wholeBeat % 2 === 0) this.flash(0.18);
+  }
+
+  /** 割り当て画面または全演出を現在の表示状態に応じてクリアする */
+  private handleClearAction(): void {
+    if (!this.assignOverlay.hidden) {
+      const remaining = this.pendingAssignments.length;
+      this.closeAssignOverlay(true);
+      this.logAction(`D&D ASSIGN CONFIRM${remaining ? ` / SKIP ${remaining}` : ""}`);
+      return;
     }
+    this.clearAllAnimations();
   }
 
   /** 演出と音声と自動再生状態をまとめて初期化する */
   private clearAllAnimations(): void {
     this.resetGeneration += 1;
     this.animation.clear();
-    this.heldInputs.clear();
-    this.latchedCues.clear();
-    this.updateLatchUi();
-
-    this.recorder.clear(this.clock.beatAt());
-    this.updateRecordButton();
+    this.cueEngine.clear();
 
     this.characterPresenceUntil = 0;
     if (this.activeActor) this.activeActor.visible = false;
-    if (this.ambientActor) this.ambientActor.visible = false;
     this.activeSlot = null;
-
-    for (const sprite of this.latchedActors.values()) {
-      if (!sprite.destroyed) sprite.destroy();
-    }
-    this.latchedActors.clear();
-
-    for (const entry of this.persistentBackgroundCharacters) {
-      if (entry.sprite.destroyed) continue;
-      entry.sprite.visible = false;
-      entry.sprite.removeFromParent();
-      // 背景キャラクターの上限と同じ数だけ再利用してメモリ増加を防ぐ
-      if (this.backgroundCharacterPool.length < 24) this.backgroundCharacterPool.push(entry.sprite);
-      else entry.sprite.destroy();
-    }
-    this.persistentBackgroundCharacters = [];
+    this.stageRenderer.clear();
 
     const pooledChildren = [
       ...this.fxLayer.removeChildren(),
@@ -703,335 +407,58 @@ export class VJApp implements EffectHost {
         child.destroy();
       }
     }
-    this.audio.stopAll();
+    this.slotStore.stopAudio();
     this.root.position.set(0, 0);
-    this.flashElement.style.transition = "none";
-    this.flashElement.style.opacity = "0";
-    this.beatPulse.getAnimations().forEach((animation) => animation.cancel());
-    this.beatPulse.classList.remove("hit");
+    this.uiController.clearFeedback();
     this.logAction("ENTER / ALL ANIMATIONS CLEAR");
   }
 
   /** クオンタイズ待ちの前に入力受付を短い枠線アニメーションで示す */
   private immediateFeedback(effect: EffectId): void {
-    this.beatPulse.dataset.effect = effect;
-    this.beatPulse.getAnimations().forEach((animation) => animation.cancel());
-    this.beatPulse.animate(
-      [
-        { borderWidth: "5px", borderColor: "rgba(255,255,255,.9)" },
-        { borderWidth: "1px", borderColor: "rgba(255,255,255,.12)" },
-      ],
-      { duration: 140, easing: "ease-out" },
-    );
-  }
-
-  /** 背景を構成する抽象図形を生成する */
-  private createBackground(): void {
-    for (let i = 0; i < 16; i += 1) {
-      const g = new Graphics();
-      const size = 22 + (i % 5) * 18;
-      if (i % 3 === 0) g.circle(0, 0, size).stroke({ width: 3, color: 0xffffff, alpha: 0.15 });
-      else g.rect(-size, -size, size * 2, size * 2).stroke({ width: 2, color: 0xffffff, alpha: 0.11 });
-      g.rotation = i * 0.45;
-      this.backgroundLayer.addChild(g);
-      this.backgroundShapes.push(g);
-    }
-  }
-
-  /** BPM位相に合わせて背景図形を移動させる */
-  private updateBackground(now: number): void {
-    if (this.hideBackground) return;
-    const beat = this.clock.beatAt(now);
-    const pulse = 0.5 + 0.5 * Math.cos(this.clock.phase(now) * Math.PI * 2);
-    this.backgroundShapes.forEach((shape, index) => {
-      const lane = index % 4;
-      const speed = 0.018 + lane * 0.004;
-      shape.rotation += speed * (index % 2 ? 1 : -1);
-      shape.x = this.width * (0.5 + 0.42 * Math.sin(beat * 0.22 + index * 1.7));
-      shape.y = this.height * (0.5 + 0.42 * Math.cos(beat * 0.18 + index * 1.19));
-      shape.scale.set(0.7 + pulse * 0.18 + (index % 4) * 0.09);
-    });
-  }
-
-  /** 背景へ薄く表示するキャラクターを指定スロットへ切り替える */
-  private setAmbientSlot(index: number): void {
-    const texture = this.slots[index]?.texture;
-    if (!texture) return;
-    if (!this.ambientActor) {
-      this.ambientActor = new Sprite(texture);
-      this.ambientActor.anchor.set(0.5);
-      this.ambientLayer.addChild(this.ambientActor);
-    } else if (this.ambientActor.texture !== texture) {
-      this.ambientActor.texture = texture;
-    }
-    this.fitAmbient();
-  }
-
-  /** 指定キャラクターの小さな背景コピーを2体追加する */
-  private seedBackgroundCharacters(index: number): void {
-    const texture = this.slots[index]?.texture;
-    if (!texture) return;
-    for (let i = 0; i < 2; i += 1) {
-      // 長時間の連打でも個数が増えないよう古い要素を循環利用する
-      let entry = this.persistentBackgroundCharacters.length >= 24
-        ? this.persistentBackgroundCharacters.shift()
-        : undefined;
-      if (!entry || entry.sprite.destroyed) {
-        const sprite = this.backgroundCharacterPool.pop() ?? new Sprite(texture);
-        sprite.texture = texture;
-        sprite.anchor.set(0.5);
-        sprite.visible = true;
-        this.ambientLayer.addChild(sprite);
-        entry = { sprite, slot: index, seed: 0, size: 0, flip: 1, alpha: 0 };
-      } else {
-        entry.sprite.texture = texture;
-        entry.sprite.visible = true;
-      }
-      entry.slot = index;
-      entry.seed = Math.random() * 1000;
-      entry.size = 0.085 + Math.random() * 0.075;
-      entry.flip = Math.random() < 0.35 ? -1 : 1;
-      entry.alpha = 0.025 + Math.random() * 0.035;
-      this.persistentBackgroundCharacters.push(entry);
-    }
-  }
-
-  /** 背景キャラクターを拍に合わせて漂わせる */
-  private updateAmbient(now: number): void {
-    const beat = this.clock.beatAt(now);
-    const phase = this.clock.phase(now);
-    const pulse = 0.5 + 0.5 * Math.cos(phase * Math.PI * 2);
-
-    this.persistentBackgroundCharacters.forEach((entry, index) => {
-      const slot = this.slots[entry.slot];
-      if (!slot.texture || entry.sprite.destroyed) return;
-      if (entry.sprite.texture !== slot.texture) entry.sprite.texture = slot.texture;
-      const fit = this.fitScales[entry.slot] * this.transformFor(entry.slot).scale;
-      const scale = fit * entry.size * (1 + pulse * 0.12);
-      entry.sprite.position.set(
-        this.width * (0.5 + 0.46 * Math.sin(beat * (0.11 + (index % 7) * 0.009) + entry.seed)),
-        this.height * (0.5 + 0.43 * Math.cos(beat * (0.095 + (index % 5) * 0.008) + entry.seed * 0.73)),
-      );
-      entry.sprite.rotation = Math.sin(beat * 0.19 + entry.seed) * 0.18;
-      entry.sprite.scale.set(scale * entry.flip, scale);
-      entry.sprite.alpha = entry.alpha;
-      entry.sprite.visible = true;
-    });
-
-    if (!this.ambientActor) return;
-    const present = now <= this.characterPresenceUntil;
-    this.ambientActor.visible = present;
-    if (!present || this.activeSlot === null) return;
-
-    const transform = this.transformFor(this.activeSlot);
-    const base = this.ambientBaseScale();
-    const anchorX = this.width * transform.anchorX;
-    const anchorY = this.height * transform.anchorY;
-    this.ambientActor.position.set(
-      anchorX + Math.sin(beat * 0.42) * this.width * 0.035,
-      anchorY + this.height * 0.03 + Math.sin(beat * Math.PI * 0.5) * this.height * 0.018,
-    );
-    this.ambientActor.rotation = Math.sin(beat * 0.38) * 0.025;
-    this.ambientActor.scale.set(base * (0.96 + pulse * 0.06), base * (0.98 - pulse * 0.025));
-    this.ambientActor.alpha = 0.05 + pulse * 0.04;
-  }
-
-  /** ラッチ中のキャラクターを最大4列へ並べて固有演出を反復する */
-  private updateLatchedActors(now: number): void {
-    const cues = [...this.latchedCues.keys()].slice(0, 4);
-    const count = cues.length;
-    if (!count) return;
-    const beat = this.clock.beatAt(now);
-    const phase = this.clock.phase(now);
-    const wholeBeat = Math.floor(beat);
-
-    cues.forEach((cue, column) => {
-      if (cue === 8) return;
-      const slot = this.slots[cue];
-      const texture = slot.texture;
-      if (!texture) return;
-      let sprite = this.latchedActors.get(cue);
-      if (!sprite || sprite.destroyed) {
-        sprite = new Sprite(texture);
-        sprite.anchor.set(0.5);
-        this.latchedLayer.addChild(sprite);
-        this.latchedActors.set(cue, sprite);
-      } else if (sprite.texture !== texture) {
-        sprite.texture = texture;
-      }
-
-      const fit = this.fitScales[cue];
-      const transform = this.transformFor(cue);
-      const base = fit * transform.scale;
-      // ラッチ数で画面を等分し各キューの基準位置を独立させる
-      const columnWidth = this.width / count;
-      let x = this.width * ((column + 0.5) / count) + this.width * (transform.anchorX - 0.5);
-      let y = this.height * transform.anchorY;
-      let sx = base;
-      let sy = base;
-      let rotation = 0;
-      const direction = (cue + wholeBeat) % 2 ? -1 : 1;
-
-      if (cue === 0) {
-        const t = Math.min(1, phase * 2.15);
-        const c1 = 1.70158;
-        const c3 = c1 + 1;
-        const back = 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
-        sx *= 0.72 + 0.28 * back;
-        sy *= 0.82 + 0.18 * back;
-        y += this.height * 0.055 * (1 - (t === 1 ? 1 : 1 - Math.pow(2, -10 * t)));
-      } else if (cue === 1) {
-        const t = Math.min(1, phase * 3);
-        const expo = t === 1 ? 1 : 1 - Math.pow(2, -10 * t);
-        x += direction * (1 - expo) * columnWidth * 0.34;
-        rotation = direction * (1 - phase) * 0.08;
-      } else if (cue === 2) {
-        x += Math.sin(phase * Math.PI * 4) * 12;
-        y += Math.sin(phase * Math.PI * 2) * 18;
-        sprite.alpha = 0.84 + Math.sin(phase * Math.PI * 2) * 0.1;
-      } else if (cue === 3) {
-        const hit = Math.exp(-phase * 8) * Math.sin(phase * Math.PI * 2);
-        sx *= 1 + 0.24 * hit;
-        sy *= 1 + 0.18 * hit;
-      } else if (cue === 4) {
-        const step = Math.floor(phase * 8);
-        sx *= step % 2 ? -1 : 1;
-        sy *= step % 4 < 2 ? 1 : -1;
-        y += Math.cos(step * 1.7) * this.height * 0.018;
-      } else if (cue === 5) {
-        const hop = Math.sin(phase * Math.PI);
-        y -= Math.max(0, hop) * this.height * 0.14;
-        sx *= 1 + 0.06 * hop;
-        sy *= 1 - 0.06 * hop;
-      } else if (cue === 6) {
-        sx *= 0.82 + 0.12 * Math.sin(phase * Math.PI * 6);
-        sy *= 0.82 + 0.12 * Math.cos(phase * Math.PI * 6);
-        x += Math.sin(phase * Math.PI * 8 + cue) * columnWidth * 0.08;
-      } else if (cue === 7) {
-        const step = Math.floor(phase * 8);
-        sx *= step % 2 ? -1 : 1;
-        y -= Math.abs(Math.sin(phase * Math.PI * 2)) * this.height * 0.08;
-        x += Math.sin(phase * Math.PI * 6 + cue) * columnWidth * 0.08;
-        rotation = Math.sin(phase * Math.PI * 4) * 0.12;
-      }
-
-      sprite.position.set(x, y);
-      sprite.scale.set(sx, sy);
-      sprite.rotation = rotation;
-      if (cue !== 2) sprite.alpha = 0.96;
-      sprite.visible = true;
-    });
-  }
-
-  /** 前景余白を除いて背景アクター用の少し小さいスケールを返す */
-  private ambientBaseScale(): number {
-    if (!this.ambientActor || this.activeSlot === null) return 1;
-    const transform = this.transformFor(this.activeSlot);
-    // fitScalesの6%余白を一度戻してから背景用の82%へ揃える
-    return (this.fitScales[this.activeSlot] / 0.94) * 0.82 * transform.scale;
-  }
-
-  /** 背景アクターを現在スロットの変形へ合わせる */
-  private fitAmbient(): void {
-    if (!this.ambientActor || this.activeSlot === null) return;
-    const transform = this.transformFor(this.activeSlot);
-    const scale = this.ambientBaseScale();
-    this.ambientActor.position.set(this.width * transform.anchorX, this.height * transform.anchorY + this.height * 0.03);
-    this.ambientActor.scale.set(scale);
+    this.uiController.immediateFeedback(effect);
   }
 
   /** 直近12秒のBPM履歴を100ms間隔でグラフへ反映する */
   private updateBpmGraph(now: number): void {
-    if (!this.bpmGraphPath || !this.bpmGraphValue || now - this.lastBpmSample < 100) return;
-    this.lastBpmSample = now;
-    this.bpmHistory.push({ time: now, bpm: this.clock.bpm });
-    while (this.bpmHistory.length > 1 && this.bpmHistory[0].time < now - 12000) this.bpmHistory.shift();
-    if (!this.bpmHistory.length) return;
-    const values = this.bpmHistory.map((point) => point.bpm);
-    const low0 = Math.min(...values);
-    const high0 = Math.max(...values);
-    // BPMが一定でも線が端へ張り付かないよう最低2 BPMの上下余白を設ける
-    const padding = Math.max(2, (high0 - low0) * 0.25);
-    const low = Math.max(0, low0 - padding);
-    const high = high0 + padding;
-    const span = Math.max(1, high - low);
-    const path = this.bpmHistory.map((point, index) => {
-      const x = Math.max(0, Math.min(260, 260 - ((now - point.time) / 12000) * 260));
-      const y = 70 - ((point.bpm - low) / span) * 64;
-      return `${index ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`;
-    }).join(" ");
-    this.bpmGraphPath.setAttribute("d", path);
-    this.bpmGraphValue.textContent = this.clock.bpm.toFixed(2);
+    this.uiController.updateBpmGraph(now, this.clock.bpm);
   }
 
   /** 全体または現在スロットだけの表示サイズを調整する */
   private adjustActiveScale(delta: number, individual = false): void {
     const index = this.activeSlot ?? this.selectedSlot;
-    const slot = this.slots[index];
-    if (individual) {
-      const current = this.transformFor(index).scale;
-      const next = Math.max(0.35, Math.min(2.5, current + delta));
-      // 共通値が後から変わっても個別差分を維持できるよう絶対値ではなく補正量を保存する
-      slot.scaleOffset = next - this.commonTransform.scale;
-      this.refreshTransforms();
-      this.logAction(`CUE ${index + 1} SIZE ${Math.round(next * 100)}%`);
-    } else {
-      this.commonTransform.scale = Math.max(0.35, Math.min(2.5, this.commonTransform.scale + delta));
-      this.refreshTransforms();
-      this.logAction(`ALL SIZE ${Math.round(this.commonTransform.scale * 100)}%`);
-    }
+    const scale = this.slotStore.adjustScale(index, delta, individual);
+    this.logAction(individual
+      ? `CUE ${index + 1} SIZE ${Math.round(scale * 100)}%`
+      : `ALL SIZE ${Math.round(scale * 100)}%`);
     this.fitActor();
-    this.fitAmbient();
+    this.stageRenderer.fitAmbient(this.activeSlot);
   }
 
   /** 全体または現在スロットだけの表示基準位置を調整する */
   private moveActiveAnchor(dx: number, dy: number, individual = false): void {
     const index = this.activeSlot ?? this.selectedSlot;
-    const slot = this.slots[index];
-    if (individual) {
-      const current = this.transformFor(index);
-      const nextX = Math.max(0.15, Math.min(0.85, current.anchorX + dx));
-      const nextY = Math.max(0.15, Math.min(0.85, current.anchorY + dy));
-      slot.anchorXOffset = nextX - this.commonTransform.anchorX;
-      slot.anchorYOffset = nextY - this.commonTransform.anchorY;
-      this.refreshTransforms();
-      this.logAction(`CUE ${index + 1} POS ${Math.round(nextX * 100)},${Math.round(nextY * 100)}`);
-    } else {
-      this.commonTransform.anchorX = Math.max(0.15, Math.min(0.85, this.commonTransform.anchorX + dx));
-      this.commonTransform.anchorY = Math.max(0.15, Math.min(0.85, this.commonTransform.anchorY + dy));
-      this.refreshTransforms();
-      this.logAction(`ALL POS ${Math.round(this.commonTransform.anchorX * 100)},${Math.round(this.commonTransform.anchorY * 100)}`);
-    }
+    const transform = this.slotStore.moveAnchor(index, dx, dy, individual);
+    this.logAction(individual
+      ? `CUE ${index + 1} POS ${Math.round(transform.anchorX * 100)},${Math.round(transform.anchorY * 100)}`
+      : `ALL POS ${Math.round(transform.anchorX * 100)},${Math.round(transform.anchorY * 100)}`);
     this.fitActor();
-    this.fitAmbient();
-  }
-
-  /** 左右Shiftをガイド上の一つのキー表示へ正規化する */
-  private keyVisualCode(code: string): string {
-    return code === "ShiftRight" ? "ShiftLeft" : code;
+    this.stageRenderer.fitAmbient(this.activeSlot);
   }
 
   /** 実キーまたは仮想キーの押下状態をガイドへ反映する */
   private setKeyVisual(code: string, active: boolean): void {
-    if (!this.keyGuide) return;
-    const visualCode = this.keyVisualCode(code);
-    for (const element of this.keyGuide.querySelectorAll<HTMLElement>(`[data-code="${visualCode}"]`)) {
-      element.classList.toggle("active", active);
-    }
+    this.uiController.setKeyVisual(code, active);
   }
 
   /** クリック操作用のShiftトグル状態を更新する */
   private setVirtualShift(active: boolean): void {
     this.virtualShift = active;
-    if (!this.keyGuide) return;
-    for (const element of this.keyGuide.querySelectorAll<HTMLElement>('[data-code="ShiftLeft"]')) {
-      element.classList.toggle("virtual-shift", active);
-    }
+    this.uiController.setVirtualShift(active);
   }
 
   /** ガイド上のキー押下を実キーボードと同じ操作へ変換する */
   private virtualKeyDown(code: string, sourceId: string): boolean {
-    this.audio.resume();
+    this.slotStore.resumeAudio();
     const cue = /^(?:Digit|Numpad)([1-9])$/.exec(code);
     if (cue) {
       this.handleAction({
@@ -1084,7 +511,6 @@ export class VJApp implements EffectHost {
         const value = this.clock.tap();
         const bpmInput = this.panel.querySelector<HTMLInputElement>("[data-field=bpm]");
         if (bpmInput) bpmInput.value = value.toFixed(2);
-        this.bpmHistory.push({ time: performance.now(), bpm: this.clock.bpm });
         this.logAction(`TAP ${this.clock.bpm.toFixed(2)}`);
       }
       return false;
@@ -1127,14 +553,9 @@ export class VJApp implements EffectHost {
 
   /** HUDと操作パネルと割り当て画面を生成してイベントを接続する */
   private createUi(host: HTMLElement): void {
-    const ui = createVjUi(host);
-    this.flashElement = ui.flashElement;
-    this.beatPulse = ui.beatPulse;
-    this.hud = ui.hud;
-    this.bpmGraphPath = ui.bpmGraphPath;
-    this.bpmGraphValue = ui.bpmGraphValue;
+    this.uiController = new VjUiController(host);
+    const ui = this.uiController.elements;
     this.keyGuide = ui.keyGuide;
-    this.actionLog = ui.actionLog;
     this.panel = ui.panel;
     this.assignOverlay = ui.assignOverlay;
     this.assignSources = ui.assignSources;
@@ -1176,23 +597,17 @@ export class VJApp implements EffectHost {
 
     this.cueButtons.forEach((button, index) => {
       button.addEventListener("click", (event) => {
-        if (event.shiftKey) this.toggleLatch(index, 1);
-        else this.triggerCue(index, 1);
+        this.cueEngine.trigger(index, 1, event.shiftKey);
       });
     });
 
     const bpm = this.panel.querySelector<HTMLInputElement>("[data-field=bpm]")!;
-    bpm.addEventListener("change", () => { this.clock.setBpm(Number(bpm.value)); this.bpmHistory.push({ time: performance.now(), bpm: this.clock.bpm }); this.logAction(`BPM ${this.clock.bpm.toFixed(2)}`); });
+    bpm.addEventListener("change", () => { this.clock.setBpm(Number(bpm.value)); this.logAction(`BPM ${this.clock.bpm.toFixed(2)}`); });
     const quantizeButton = this.panel.querySelector<HTMLButtonElement>("[data-action=quantize]")!;
-    const quantizeValues: Quantize[] = ["off", "1/8", "1/4", "1beat", "1bar"];
-    const quantizeLabels = ["OFF", "1/8 BEAT", "1/4 BEAT", "1 BEAT", "1 BAR"];
     // 選択肢が少ないためプルダウンではなくクリックで順番に切り替える
     quantizeButton.addEventListener("click", () => {
-      const current = quantizeValues.indexOf(this.quantize);
-      const next = (current + 1) % quantizeValues.length;
-      this.quantize = quantizeValues[next];
-      quantizeButton.textContent = `Q ${quantizeLabels[next]}`;
-      this.logAction(`QUANTIZE ${quantizeLabels[next]}`);
+      const label = this.cueEngine.cycleQuantize();
+      quantizeButton.textContent = `Q ${label}`;
     });
     const offset = this.panel.querySelector<HTMLInputElement>("[data-field=offset]")!;
     offset.addEventListener("change", () => { this.clock.setOffsetMs(Number(offset.value)); this.logAction(`OFFSET ${Number(offset.value)}ms`); });
@@ -1205,7 +620,7 @@ export class VJApp implements EffectHost {
     const hideBackground = this.panel.querySelector<HTMLInputElement>("[data-field=hide-background]")!;
     hideBackground.addEventListener("change", () => {
       this.hideBackground = hideBackground.checked;
-      this.backgroundLayer.visible = !this.hideBackground;
+      this.stageRenderer.setBackgroundVisible(!this.hideBackground);
       host.classList.toggle("background-hidden", this.hideBackground);
       this.logAction(this.hideBackground ? "BACKGROUND HIDDEN" : "BACKGROUND SHOWN");
     });
@@ -1217,22 +632,20 @@ export class VJApp implements EffectHost {
     const masterVolume = this.panel.querySelector<HTMLInputElement>("[data-field=master-volume]")!;
     const masterVolumeValue = this.panel.querySelector<HTMLElement>("[data-field=master-volume-value]")!;
     masterVolume.addEventListener("input", () => {
-      this.audio.setVolume(Number(masterVolume.value) / 100);
-      masterVolumeValue.textContent = `${Math.round(this.audio.volume * 100)}%`;
+      this.slotStore.setVolume(Number(masterVolume.value) / 100);
+      masterVolumeValue.textContent = `${Math.round(this.slotStore.volume * 100)}%`;
     });
     masterVolume.addEventListener("change", () => {
-      this.logAction(`SFX VOLUME ${Math.round(this.audio.volume * 100)}%`);
+      this.logAction(`SFX VOLUME ${Math.round(this.slotStore.volume * 100)}%`);
     });
 
     this.panel.querySelector("[data-action=tap]")!.addEventListener("click", () => {
       bpm.value = this.clock.tap().toFixed(2);
-      this.bpmHistory.push({ time: performance.now(), bpm: this.clock.bpm });
       this.logAction(`TAP ${this.clock.bpm.toFixed(2)}`);
     });
     this.panel.querySelector("[data-action=sync]")!.addEventListener("click", () => { this.clock.sync(); this.logAction("SYNC"); });
     this.panel.querySelector("[data-action=hide]")!.addEventListener("click", () => { this.panel.classList.add("hidden"); this.logAction("MENU HIDE"); });
-    this.recordButton = this.panel.querySelector<HTMLButtonElement>("[data-action=record]")!;
-    this.recordButton.addEventListener("click", () => this.toggleRecord());
+    this.panel.querySelector<HTMLButtonElement>("[data-action=record]")!.addEventListener("click", () => this.toggleRecord());
     this.panel.querySelector("[data-action=fullscreen]")!.addEventListener("click", () => { this.logAction("FULLSCREEN"); void document.documentElement.requestFullscreen?.(); });
     this.panel.querySelector("[data-action=midi]")!.addEventListener("click", async (event) => {
       const button = event.currentTarget as HTMLButtonElement;
@@ -1288,7 +701,6 @@ export class VJApp implements EffectHost {
           this.logAction("SYNC");
         } else {
           bpm.value = this.clock.tap().toFixed(2);
-          this.bpmHistory.push({ time: performance.now(), bpm: this.clock.bpm });
           this.logAction(`TAP ${this.clock.bpm.toFixed(2)}`);
         }
         return;
@@ -1298,8 +710,12 @@ export class VJApp implements EffectHost {
         event.preventDefault();
         this.toggleRecord();
       }
-    }, true);
-    window.addEventListener("keyup", (event) => this.setKeyVisual(event.code, false), true);
+    }, { capture: true, signal: this.lifecycleAbort.signal });
+    window.addEventListener(
+      "keyup",
+      (event) => this.setKeyVisual(event.code, false),
+      { capture: true, signal: this.lifecycleAbort.signal },
+    );
 
     this.makePanelDraggable();
     this.selectSlot(0, false);
@@ -1401,8 +817,9 @@ export class VJApp implements EffectHost {
       const panelBackground = this.slotElements[index]?.style.backgroundImage ?? "";
       target.style.backgroundImage = panelBackground;
       const names: string[] = [];
-      if (this.slots[index]?.texture) names.push(`${this.slots[index].isGif ? "GIF" : "IMG"} ${this.slots[index].name}`);
-      if (this.slots[index]?.audioBuffer) names.push(`SFX ${this.slots[index].audioName}`);
+      const slot = this.slotStore.get(index);
+      if (slot.texture) names.push(`${slot.isGif ? "GIF" : "IMG"} ${slot.name}`);
+      if (slot.audioBuffer) names.push(`SFX ${slot.audioName}`);
       const label = target.querySelector("small");
       if (label) label.textContent = names.join(" + ") || "EMPTY";
     });
@@ -1448,13 +865,13 @@ export class VJApp implements EffectHost {
         return;
       }
       document.body.classList.add("is-dragging");
-    });
+    }, { signal: this.lifecycleAbort.signal });
     host.addEventListener("dragleave", (event) => {
       if (event.target === host) {
         document.body.classList.remove("is-dragging");
         this.dropOverlaySuppressed = false;
       }
-    });
+    }, { signal: this.lifecycleAbort.signal });
     host.addEventListener("drop", (event) => {
       event.preventDefault();
       document.body.classList.remove("is-dragging");
@@ -1479,7 +896,7 @@ export class VJApp implements EffectHost {
       else audio.forEach((file, index) => jobs.push(this.assignAudioFile(index, file)));
       if (!jobs.length) return;
       void Promise.all(jobs).then(() => this.selectSlot(images.length > 1 || audio.length > 1 ? 0 : this.selectedSlot));
-    });
+    }, { signal: this.lifecycleAbort.signal });
   }
 
   /** 画像またはGIFをデコードして指定スロットへ割り当てる */
@@ -1489,64 +906,27 @@ export class VJApp implements EffectHost {
       return;
     }
     if (!file.type.startsWith("image/")) return;
-    const previous = this.slots[index];
-    const loaded = await loadImageFile(file);
-    // 初回キューでGPU転送が発生して引っかからないよう先にアップロードする
-    try {
-      await this.app.renderer.prepare.upload(loaded.texture);
-    } catch (error) {
-      // GPU転送失敗時は新規リソースだけを解放して現在のスロットを維持する
-      URL.revokeObjectURL(loaded.objectUrl);
-      try { loaded.gifDecoder?.close?.(); } catch { /* デコーダーが既に閉じていれば何もしない */ }
-      throw error;
-    }
-    // 新しい画像の準備完了後に古いリソースを解放して失敗時の表示を維持する
-    if (previous.objectUrl) URL.revokeObjectURL(previous.objectUrl);
-    try { previous.gifDecoder?.close?.(); } catch { /* デコーダーが既に閉じていれば何もしない */ }
-
-    this.slots[index] = {
-      texture: loaded.texture,
-      name: file.name,
-      objectUrl: loaded.objectUrl,
-      isGif: loaded.isGif,
-      gifDecoder: loaded.gifDecoder,
-      gifCanvas: loaded.gifCanvas,
-      gifFrameIndex: 0,
-      gifFrameCount: loaded.gifFrameCount,
-      gifNextAt: loaded.gifNextAt,
-      gifDecoding: false,
-      gifActiveUntil: 0,
-      // 画像差し替え時も同じスロットの音声と表示補正は維持する
-      audioBuffer: previous.audioBuffer,
-      audioName: previous.audioName,
-      audioStart: previous.audioStart,
-      audioDuration: previous.audioDuration,
-      scaleOffset: previous.scaleOffset,
-      anchorXOffset: previous.anchorXOffset,
-      anchorYOffset: previous.anchorYOffset,
-    };
-    this.refreshFitScales();
+    const loaded = await this.slotStore.assignImage(
+      index,
+      file,
+      (texture) => this.app.renderer.prepare.upload(texture),
+    );
     const el = this.slotElements[index];
     el.classList.add("loaded");
     el.style.backgroundImage = `url(${loaded.preview})`;
     el.querySelector<HTMLElement>("[data-image]")!.textContent = `${loaded.isGif ? "GIF" : "IMG"} ${file.name.replace(/\.[^.]+$/, "").slice(0, 10)}`;
-    if (this.activeSlot === index) {
+    const wasActive = this.activeSlot === index;
+    if (wasActive) {
       if (this.activeActor && !this.activeActor.destroyed) {
         this.activeActor.texture = loaded.texture;
         this.activeActor.visible = false;
       }
-      if (this.ambientActor && !this.ambientActor.destroyed) {
-        this.ambientActor.texture = loaded.texture;
-        this.ambientActor.visible = false;
-      }
+      this.stageRenderer.refreshSlot(index, index);
       this.activeSlot = null;
       this.characterPresenceUntil = 0;
+    } else {
+      this.stageRenderer.refreshSlot(index, this.activeSlot);
     }
-    const latched = this.latchedActors.get(index);
-    if (latched && !latched.destroyed) latched.texture = loaded.texture;
-    this.persistentBackgroundCharacters.forEach((entry) => {
-      if (entry.slot === index && !entry.sprite.destroyed) entry.sprite.texture = loaded.texture;
-    });
     this.updateAssignTargets();
     this.logAction(`LOAD ${index + 1} ${file.name}${loaded.isGif ? ` / GIF DECODER ${loaded.gifFrameCount}F` : ""}`);
   }
@@ -1560,7 +940,7 @@ export class VJApp implements EffectHost {
 
   /** 指定スロットを前景アクターとして表示可能な状態へ切り替える */
   private activateSlot(index: number): boolean {
-    const texture = this.slots[index].texture;
+    const texture = this.slotStore.get(index).texture;
     if (!texture) return false;
 
     if (!this.activeActor) {
@@ -1587,42 +967,16 @@ export class VJApp implements EffectHost {
 
   /** 表示中またはラッチ中のGIFだけ次フレームへ進める */
   private updateAnimatedGifs(now: number): void {
-    this.slots.forEach((slot, index) => {
-      if (!slot.isGif || !slot.gifDecoder || !slot.gifCanvas || !slot.texture) return;
-      const live = now <= (slot.gifActiveUntil ?? 0) || this.latchedCues.has(index);
-      // 非表示GIFを止めて負荷を抑え同じデコーダーの並列decodeも防ぐ
-      if (!live || slot.gifDecoding || now < (slot.gifNextAt ?? 0) || (slot.gifFrameCount ?? 1) < 2) return;
-
-      slot.gifDecoding = true;
-      const nextFrame = ((slot.gifFrameIndex ?? 0) + 1) % Math.max(1, slot.gifFrameCount ?? 1);
-      void slot.gifDecoder.decode({ frameIndex: nextFrame, completeFramesOnly: true }).then(({ image }) => {
-        const ctx = slot.gifCanvas!.getContext("2d", { alpha: true });
-        if (ctx) {
-          ctx.clearRect(0, 0, slot.gifCanvas!.width, slot.gifCanvas!.height);
-          ctx.drawImage(image as unknown as CanvasImageSource, 0, 0, slot.gifCanvas!.width, slot.gifCanvas!.height);
-          // Canvasの内容変更をPixiJS側のGPUテクスチャへ通知する
-          const source = slot.texture!.source as unknown as { update?: () => void };
-          source.update?.();
-        }
-        slot.gifFrameIndex = nextFrame;
-        slot.gifNextAt = performance.now() + getGifFrameDurationMs(image);
-        image.close?.();
-      }).catch((error) => {
-        console.warn("GIF frame decode failed", error);
-        slot.gifNextAt = performance.now() + 100;
-      }).finally(() => {
-        slot.gifDecoding = false;
-      });
-    });
+    this.slotStore.updateAnimatedGifs(now, (index) => this.cueEngine.isLatched(index));
   }
 
   /** ウィンドウサイズ変更後の座標とフィット率を更新する */
   private resize(): void {
     this.width = window.innerWidth;
     this.height = window.innerHeight;
-    this.refreshFitScales();
+    this.slotStore.resize(this.width, this.height);
     this.fitActor();
-    this.fitAmbient();
+    this.stageRenderer.resize(this.width, this.height, this.activeSlot);
   }
 
   /** ライブ状態を一定間隔でHUDへ反映する */
@@ -1632,15 +986,21 @@ export class VJApp implements EffectHost {
     this.lastHudUpdate = now;
     const position = this.clock.barBeat(now);
     const live = this.activeSlot === null ? "—" : String(this.activeSlot + 1);
-    const mode = this.recorder.isRecording ? "REC 2 BARS" : this.recorder.isLooping ? "LOOP 2 BARS" : "LIVE";
-    const auto = [...this.latchedCues.keys()].map((cue) => cue + 1).join(",") || "—";
+    const mode = this.cueEngine.isRecording ? "REC 2 BARS" : this.cueEngine.isLooping ? "LOOP 2 BARS" : "LIVE";
+    const auto = this.cueEngine.latchedCueNumbers().map((cue) => cue + 1).join(",") || "—";
     const target = this.transformFor(this.activeSlot ?? this.selectedSlot);
-    const html = `<b>${this.clock.bpm.toFixed(2)} BPM</b><span>BAR ${position.bar} · BEAT ${position.beat}</span><span>Q ${this.quantize.toUpperCase()}</span><span>CUE ${live}</span><span>AUTO ${auto}</span><span>${mode}</span><span>SIZE ${Math.round(target.scale * 100)}%</span><span>POS ${Math.round(target.anchorX * 100)},${Math.round(target.anchorY * 100)}</span>`;
-    // 内容が同じ場合はレイアウト再計算を発生させない
-    if (html !== this.lastHudHtml) {
-      this.lastHudHtml = html;
-      this.hud.innerHTML = html;
-    }
-    this.beatPulse.style.setProperty("--phase", String(position.phase));
+    this.uiController.updateHud({
+      bpm: this.clock.bpm,
+      bar: position.bar,
+      beat: position.beat,
+      phase: position.phase,
+      quantize: this.cueEngine.quantize,
+      liveCue: live,
+      autoCues: auto,
+      mode,
+      scale: target.scale,
+      anchorX: target.anchorX,
+      anchorY: target.anchorY,
+    });
   }
 }

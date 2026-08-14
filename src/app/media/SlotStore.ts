@@ -1,0 +1,286 @@
+import type { Texture } from "pixi.js";
+import { createEmptySlot, type Slot } from "../models/Slot";
+import { AudioManager } from "../services/AudioManager";
+import { getGifFrameDurationMs, loadImageFile } from "../services/ImageLoader";
+
+export interface SlotTransform {
+  scale: number;
+  anchorX: number;
+  anchorY: number;
+}
+
+export interface ImageAssignment {
+  texture: Texture;
+  preview: string;
+  isGif: boolean;
+  gifFrameCount: number;
+}
+
+export interface AudioAssignment {
+  name: string;
+  trimmedMs: number;
+}
+
+/** スロットのメディアと表示補正を一元管理する */
+export class SlotStore {
+  private slots: Slot[];
+  private commonTransform: SlotTransform = { scale: 1, anchorX: 0.5, anchorY: 0.5 };
+  private resolvedTransforms: SlotTransform[];
+  private fitScales: number[];
+  private viewportWidth = 1280;
+  private viewportHeight = 720;
+  private audio = new AudioManager();
+
+  /** 指定数の空スロットを生成する */
+  constructor(count = 8) {
+    this.slots = Array.from({ length: count }, () => createEmptySlot());
+    this.resolvedTransforms = Array.from({ length: count }, () => ({ scale: 1, anchorX: 0.5, anchorY: 0.5 }));
+    this.fitScales = Array.from({ length: count }, () => 1);
+  }
+
+  /** スロット数を返す */
+  get length(): number {
+    return this.slots.length;
+  }
+
+  /** 指定スロットを読み取り用に返す */
+  get(index: number): Slot {
+    return this.slots[index] ?? this.slots[0];
+  }
+
+  /** 指定スロットに画像または音声があるか返す */
+  hasCue(index: number): boolean {
+    const slot = this.slots[index];
+    return Boolean(slot?.texture || slot?.audioBuffer);
+  }
+
+  /** 指定スロットに画像があるか返す */
+  hasImage(index: number): boolean {
+    return Boolean(this.slots[index]?.texture);
+  }
+
+  /** 現在のマスター音量を返す */
+  get volume(): number {
+    return this.audio.volume;
+  }
+
+  /** 指定スロットの確定済み表示変形を返す */
+  transformFor(index: number): SlotTransform {
+    return this.resolvedTransforms[index] ?? this.resolvedTransforms[0];
+  }
+
+  /** 指定スロットの画面フィット率を返す */
+  fitScaleFor(index: number): number {
+    return this.fitScales[index] ?? 1;
+  }
+
+  /** 画面サイズを更新して全画像のフィット率を再計算する */
+  resize(width: number, height: number): void {
+    this.viewportWidth = width;
+    this.viewportHeight = height;
+    this.refreshFitScales();
+  }
+
+  /** 画像を読み込み指定スロットへ割り当てる */
+  async assignImage(
+    index: number,
+    file: File,
+    prepareTexture: (texture: Texture) => Promise<void>,
+  ): Promise<ImageAssignment> {
+    const previous = this.get(index);
+    const loaded = await loadImageFile(file);
+    try {
+      // 初回キューでGPU転送が発生して引っかからないよう先にアップロードする
+      await prepareTexture(loaded.texture);
+    } catch (error) {
+      // GPU転送失敗時は新規リソースだけを解放して現在のスロットを維持する
+      URL.revokeObjectURL(loaded.objectUrl);
+      try { loaded.gifDecoder?.close?.(); } catch { /* デコーダーが既に閉じていれば何もしない */ }
+      throw error;
+    }
+
+    // 新しい画像の準備完了後に古いリソースを解放して失敗時の表示を維持する
+    this.releaseImageResources(previous);
+    this.slots[index] = {
+      texture: loaded.texture,
+      name: file.name,
+      objectUrl: loaded.objectUrl,
+      isGif: loaded.isGif,
+      gifDecoder: loaded.gifDecoder,
+      gifCanvas: loaded.gifCanvas,
+      gifFrameIndex: 0,
+      gifFrameCount: loaded.gifFrameCount,
+      gifNextAt: loaded.gifNextAt,
+      gifDecoding: false,
+      gifActiveUntil: 0,
+      // 画像差し替え時も同じスロットの音声と表示補正は維持する
+      audioBuffer: previous.audioBuffer,
+      audioName: previous.audioName,
+      audioStart: previous.audioStart,
+      audioDuration: previous.audioDuration,
+      scaleOffset: previous.scaleOffset,
+      anchorXOffset: previous.anchorXOffset,
+      anchorYOffset: previous.anchorYOffset,
+    };
+    this.refreshFitScales();
+    return {
+      texture: loaded.texture,
+      preview: loaded.preview,
+      isGif: loaded.isGif,
+      gifFrameCount: loaded.gifFrameCount,
+    };
+  }
+
+  /** 音声をデコードして指定スロットへ割り当てる */
+  async assignAudio(index: number, file: File): Promise<AudioAssignment> {
+    const decoded = await this.audio.decode(file);
+    const slot = this.get(index);
+    slot.audioBuffer = decoded.buffer;
+    slot.audioName = decoded.name;
+    slot.audioStart = decoded.start;
+    slot.audioDuration = decoded.duration;
+    return { name: decoded.name, trimmedMs: decoded.trimmedMs };
+  }
+
+  /** 指定スロットの音声を再生する */
+  playAudio(index: number, strength = 1): void {
+    const slot = this.get(index);
+    if (!slot.audioBuffer || slot.audioDuration <= 0) return;
+    this.audio.play({
+      buffer: slot.audioBuffer,
+      start: slot.audioStart,
+      duration: slot.audioDuration,
+    }, strength);
+  }
+
+  /** 音声コンテキストを再開する */
+  resumeAudio(): void {
+    this.audio.resume();
+  }
+
+  /** マスター音量を更新する */
+  setVolume(value: number): void {
+    this.audio.setVolume(value);
+  }
+
+  /** 再生中の音声をすべて停止する */
+  stopAudio(): void {
+    this.audio.stopAll();
+  }
+
+  /** 画像読み込み済みスロットを偏りなく一つ選ぶ */
+  randomImageSlot(): number | null {
+    const loaded = this.slots.flatMap((slot, index) => slot.texture ? [index] : []);
+    if (!loaded.length) return null;
+    return loaded[Math.floor(Math.random() * loaded.length)];
+  }
+
+  /** GIFを指定時刻までアクティブとして扱う */
+  activateGif(index: number, until: number): void {
+    const slot = this.get(index);
+    if (slot.isGif) slot.gifActiveUntil = Math.max(slot.gifActiveUntil, until);
+  }
+
+  /** 表示中またはラッチ中のGIFだけ次フレームへ進める */
+  updateAnimatedGifs(now: number, isLatched: (index: number) => boolean): void {
+    this.slots.forEach((slot, index) => {
+      if (!slot.isGif || !slot.gifDecoder || !slot.gifCanvas || !slot.texture) return;
+      const live = now <= slot.gifActiveUntil || isLatched(index);
+      // 非表示GIFを止めて負荷を抑え同じデコーダーの並列decodeも防ぐ
+      if (!live || slot.gifDecoding || now < slot.gifNextAt || slot.gifFrameCount < 2) return;
+
+      slot.gifDecoding = true;
+      const nextFrame = (slot.gifFrameIndex + 1) % Math.max(1, slot.gifFrameCount);
+      void slot.gifDecoder.decode({ frameIndex: nextFrame, completeFramesOnly: true }).then(({ image }) => {
+        const context = slot.gifCanvas!.getContext("2d", { alpha: true });
+        if (context) {
+          context.clearRect(0, 0, slot.gifCanvas!.width, slot.gifCanvas!.height);
+          context.drawImage(image as unknown as CanvasImageSource, 0, 0, slot.gifCanvas!.width, slot.gifCanvas!.height);
+          // Canvasの内容変更をPixiJS側のGPUテクスチャへ通知する
+          const source = slot.texture!.source as unknown as { update?: () => void };
+          source.update?.();
+        }
+        slot.gifFrameIndex = nextFrame;
+        slot.gifNextAt = performance.now() + getGifFrameDurationMs(image);
+        image.close?.();
+      }).catch((error) => {
+        console.warn("GIF frame decode failed", error);
+        slot.gifNextAt = performance.now() + 100;
+      }).finally(() => {
+        slot.gifDecoding = false;
+      });
+    });
+  }
+
+  /** 全体または指定スロットだけの表示サイズを調整して確定値を返す */
+  adjustScale(index: number, delta: number, individual: boolean): number {
+    const slot = this.get(index);
+    if (individual) {
+      const current = this.transformFor(index).scale;
+      const next = Math.max(0.35, Math.min(2.5, current + delta));
+      // 共通値が後から変わっても個別差分を維持できるよう補正量を保存する
+      slot.scaleOffset = next - this.commonTransform.scale;
+      this.refreshTransforms();
+      return next;
+    }
+    this.commonTransform.scale = Math.max(0.35, Math.min(2.5, this.commonTransform.scale + delta));
+    this.refreshTransforms();
+    return this.commonTransform.scale;
+  }
+
+  /** 全体または指定スロットだけの基準位置を調整して確定値を返す */
+  moveAnchor(index: number, dx: number, dy: number, individual: boolean): SlotTransform {
+    const slot = this.get(index);
+    if (individual) {
+      const current = this.transformFor(index);
+      const nextX = Math.max(0.15, Math.min(0.85, current.anchorX + dx));
+      const nextY = Math.max(0.15, Math.min(0.85, current.anchorY + dy));
+      slot.anchorXOffset = nextX - this.commonTransform.anchorX;
+      slot.anchorYOffset = nextY - this.commonTransform.anchorY;
+      this.refreshTransforms();
+      return this.transformFor(index);
+    }
+    this.commonTransform.anchorX = Math.max(0.15, Math.min(0.85, this.commonTransform.anchorX + dx));
+    this.commonTransform.anchorY = Math.max(0.15, Math.min(0.85, this.commonTransform.anchorY + dy));
+    this.refreshTransforms();
+    return this.commonTransform;
+  }
+
+  /** 全スロットのメディアリソースと再生中音声を解放する */
+  destroy(): void {
+    this.audio.stopAll();
+    for (const slot of this.slots) this.releaseImageResources(slot);
+  }
+
+  /** 共通値とスロット別補正から各表示変形を再計算する */
+  private refreshTransforms(): void {
+    for (let index = 0; index < this.slots.length; index += 1) {
+      const slot = this.slots[index];
+      const resolved = this.resolvedTransforms[index];
+      // 完全な画面外化や極端な拡大を避けライブ中に復帰できる範囲へ制限する
+      resolved.scale = Math.max(0.35, Math.min(2.5, this.commonTransform.scale + slot.scaleOffset));
+      resolved.anchorX = Math.max(0.15, Math.min(0.85, this.commonTransform.anchorX + slot.anchorXOffset));
+      resolved.anchorY = Math.max(0.15, Math.min(0.85, this.commonTransform.anchorY + slot.anchorYOffset));
+    }
+  }
+
+  /** 各画像が画面内へ収まる基準スケールを再計算する */
+  private refreshFitScales(): void {
+    for (let index = 0; index < this.slots.length; index += 1) {
+      const texture = this.slots[index].texture;
+      // 端へ密着すると動きが見切れるため6%の余白を残す
+      this.fitScales[index] = texture
+        ? Math.min(
+          this.viewportWidth / Math.max(1, texture.width),
+          this.viewportHeight / Math.max(1, texture.height),
+        ) * 0.94
+        : 1;
+    }
+  }
+
+  /** スロットが保持するBlob URLとGIFデコーダーを解放する */
+  private releaseImageResources(slot: Slot): void {
+    if (slot.objectUrl) URL.revokeObjectURL(slot.objectUrl);
+    try { slot.gifDecoder?.close?.(); } catch { /* デコーダーが既に閉じていれば何もしない */ }
+  }
+}

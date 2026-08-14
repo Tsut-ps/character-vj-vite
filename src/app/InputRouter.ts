@@ -23,6 +23,17 @@ export class InputRouter {
     window.removeEventListener("keyup", this.onKeyUp, true);
   }
 
+  /** キーボードとMIDIの監視を解除して入力状態を破棄する */
+  destroy(): void {
+    this.stop();
+    if (this.midiAccess) {
+      for (const input of this.midiAccess.inputs.values()) input.onmidimessage = null;
+      this.midiAccess.onstatechange = null;
+    }
+    this.midiAccess = null;
+    this.gamepadButtons.clear();
+  }
+
   /** Web MIDIを有効化して接続中の入力名を返す */
   async enableMidi(): Promise<string[]> {
     if (!("requestMIDIAccess" in navigator)) throw new Error("Web MIDI API is not supported in this browser.");
