@@ -3,14 +3,9 @@ import type { ForegroundRenderer } from "../rendering/ForegroundRenderer";
 import type { StageRenderer } from "../rendering/StageRenderer";
 import { createPanelPreview } from "../services/ImageLoader";
 import type { VjUiElements } from "../ui/createVjUi";
+import { FileDropController } from "./FileDropController";
+import { MediaAssignmentView, type PendingAssignment } from "./MediaAssignmentView";
 import type { SlotStore } from "./SlotStore";
-
-interface PendingAssignment {
-  id: number;
-  file: File;
-  kind: "IMG" | "SFX";
-  preview: string;
-}
 
 export interface MediaAssignmentOptions {
   host: HTMLElement;
@@ -25,20 +20,26 @@ export interface MediaAssignmentOptions {
   log: (message: string) => void;
 }
 
-/** ファイルD&Dと割り当て画面とスロット表示を管理する */
+/** 素材の割り当て状態と画像や音声の読み込みを管理する */
 export class MediaAssignmentController {
   private pendingAssignments: PendingAssignment[] = [];
   private nextPendingAssignmentId = 1;
   private panelWasHiddenBeforeAssign = false;
-  private dropOverlaySuppressed = false;
-  private skipAssign = false;
   private readonly options: MediaAssignmentOptions;
+  private readonly view: MediaAssignmentView;
+  private readonly fileDrop: FileDropController;
 
-  /** 必要なUIと素材管理処理を受け取ってイベントを接続する */
+  /** 必要なUIと素材管理処理を受け取って割り当て機能を作る */
   constructor(options: MediaAssignmentOptions) {
     this.options = options;
-    this.setupAssignmentUi();
-    this.setupStageDrop();
+    this.view = new MediaAssignmentView(options.ui, options.slots);
+    this.fileDrop = new FileDropController(options.host, options.ui, options.signal, {
+      assignFile: (index, file) => { void this.assignFile(index, file); },
+      assignPending: (id, index) => { void this.assignPendingToSlot(id, index); },
+      handleFiles: (files, skipAssign) => this.handleDroppedFiles(files, skipAssign),
+      closeAssignment: () => this.close(true),
+      log: (message) => options.log(message),
+    });
   }
 
   /** 割り当て画面が表示中かどうかを返す */
@@ -48,15 +49,15 @@ export class MediaAssignmentController {
 
   /** 全画面割り当てを省略する設定を更新する */
   setSkipAssign(enabled: boolean): void {
-    this.skipAssign = enabled;
+    this.fileDrop.setSkipAssign(enabled);
   }
 
   /** 音声ファイルをデコードして指定スロットへ割り当てる */
   async assignAudio(index: number, file: File): Promise<void> {
     if (!file.type.startsWith("audio/")) return;
     const assignment = await this.options.slots.assignAudio(index, file);
-    const audioLabel = this.options.ui.slotElements[index]?.querySelector<HTMLElement>("[data-audio]");
-    if (audioLabel) audioLabel.textContent = `SFX ${file.name.replace(/\.[^.]+$/, "").slice(0, 10)}`;
+    this.view.showAudio(index, file);
+    this.view.updateTargets();
     this.options.log(`SFX ${index + 1} ${assignment.name} / TRIM ${Math.round(assignment.trimmedMs)}ms`);
   }
 
@@ -68,21 +69,18 @@ export class MediaAssignmentController {
     }
     if (!file.type.startsWith("image/")) return;
     const loaded = await this.options.slots.assignImage(index, file, this.options.uploadTexture);
-    const slotElement = this.options.ui.slotElements[index];
-    slotElement.classList.add("loaded");
-    slotElement.style.backgroundImage = `url(${loaded.preview})`;
-    slotElement.querySelector<HTMLElement>("[data-image]")!.textContent = `${loaded.isGif ? "GIF" : "IMG"} ${file.name.replace(/\.[^.]+$/, "").slice(0, 10)}`;
+    this.view.showImage(index, file, loaded.preview, loaded.isGif);
     const wasActive = this.options.foreground.activeSlot === index;
     this.options.stage.refreshSlot(index, wasActive ? index : this.options.foreground.activeSlot);
     this.options.foreground.refreshSlot(index);
-    this.updateTargets();
+    this.view.updateTargets();
     this.options.log(`LOAD ${index + 1} ${file.name}${loaded.isGif ? ` / GIF DECODER ${loaded.gifFrameCount}F` : ""}`);
   }
 
   /** 未割り当て素材を破棄して通常画面へ戻す */
   close(clear = true): void {
     if (clear) this.pendingAssignments = [];
-    this.renderOverlay();
+    this.view.renderOverlay(this.pendingAssignments, this.panelWasHiddenBeforeAssign);
     this.options.log("D&D ASSIGN CLOSE");
   }
 
@@ -95,96 +93,19 @@ export class MediaAssignmentController {
 
   /** 表示中の全画面ドロップ案内をEscで抑制する */
   cancelDropOverlay(): boolean {
-    if (!document.body.classList.contains("is-dragging")) return false;
-    document.body.classList.remove("is-dragging");
-    this.dropOverlaySuppressed = true;
-    this.options.log("DROP OVERLAY CANCEL");
-    return true;
+    return this.fileDrop.cancelDropOverlay();
   }
 
   /** 一時割り当て状態とドラッグ表示を破棄する */
   destroy(): void {
     this.pendingAssignments = [];
-    document.body.classList.remove("is-dragging");
+    this.fileDrop.destroy();
   }
 
-  /** 割り当て画面と各スロットへD&D操作を設定する */
-  private setupAssignmentUi(): void {
-    const { ui, signal } = this.options;
-    ui.assignOverlay.querySelector<HTMLElement>("[data-action=cancel-assign]")?.addEventListener(
-      "click",
-      () => this.close(true),
-      { signal },
-    );
-    [...ui.assignTargets.children].forEach((targetElement, index) => {
-      const target = targetElement as HTMLElement;
-      target.addEventListener("dragover", (event) => {
-        event.preventDefault();
-        target.classList.add("drag");
-      }, { signal });
-      target.addEventListener("dragleave", () => target.classList.remove("drag"), { signal });
-      target.addEventListener("drop", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        document.body.classList.remove("is-dragging");
-        target.classList.remove("drag");
-        const id = event.dataTransfer?.getData("text/pending-id");
-        if (id) void this.assignPendingToSlot(id, index);
-      }, { signal });
-    });
-
-    ui.slotElements.forEach((slot, index) => {
-      slot.addEventListener("dragover", (event) => {
-        event.preventDefault();
-        slot.classList.add("drag");
-      }, { signal });
-      slot.addEventListener("dragleave", () => slot.classList.remove("drag"), { signal });
-      // パネル上への直接ドロップは全画面割り当てを経由せず即時反映する
-      slot.addEventListener("drop", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        slot.classList.remove("drag");
-        const file = event.dataTransfer?.files[0];
-        if (file) void this.assignFile(index, file);
-      }, { signal });
-    });
-  }
-
-  /** ステージ全体へ画像と音声のドロップ処理を設定する */
-  private setupStageDrop(): void {
-    const { host, signal } = this.options;
-    host.addEventListener("dragover", (event) => {
-      event.preventDefault();
-      const target = event.target instanceof Element ? event.target : null;
-      const overUi = Boolean(target?.closest(".control-panel, .assign-overlay, .key-guide"));
-      if (overUi || this.dropOverlaySuppressed) {
-        document.body.classList.remove("is-dragging");
-        return;
-      }
-      document.body.classList.add("is-dragging");
-    }, { signal });
-    host.addEventListener("dragleave", (event) => {
-      if (event.target === host) {
-        document.body.classList.remove("is-dragging");
-        this.dropOverlaySuppressed = false;
-      }
-    }, { signal });
-    host.addEventListener("drop", (event) => {
-      event.preventDefault();
-      document.body.classList.remove("is-dragging");
-      this.dropOverlaySuppressed = false;
-      const target = event.target instanceof Element ? event.target : null;
-      if (target?.closest(".control-panel, .key-guide")) return;
-      // 割り当て画面内の内部ドラッグを新規ファイルドロップとして処理しない
-      if (event.dataTransfer?.getData("text/pending-id")) return;
-      const files = [...(event.dataTransfer?.files ?? [])].filter((file) => this.isSupported(file));
-      if (!files.length) return;
-      if (!this.skipAssign) {
-        void this.openOverlay(files);
-        return;
-      }
-      void this.assignSequentially(files);
-    }, { signal });
+  /** ドロップされた素材を設定に応じて割り当て画面または直接割り当てへ送る */
+  private handleDroppedFiles(files: File[], skipAssign: boolean): void {
+    if (skipAssign) void this.assignSequentially(files);
+    else void this.openOverlay(files);
   }
 
   /** ドロップ素材を最大16件まで割り当て画面へ読み込む */
@@ -204,49 +125,8 @@ export class MediaAssignmentController {
       }
       this.pendingAssignments.push({ id: this.nextPendingAssignmentId++, file, kind, preview });
     }
-    this.renderOverlay();
+    this.view.renderOverlay(this.pendingAssignments, this.panelWasHiddenBeforeAssign);
     this.options.log(`D&D ASSIGN ${valid.length} FILE${valid.length === 1 ? "" : "S"}`);
-  }
-
-  /** 未割り当て素材の一覧を割り当て画面へ再描画する */
-  private renderOverlay(): void {
-    const { assignOverlay, assignSources, panel } = this.options.ui;
-    assignOverlay.hidden = this.pendingAssignments.length === 0;
-    assignSources.replaceChildren();
-    for (const item of this.pendingAssignments) {
-      const source = document.createElement("button");
-      source.type = "button";
-      source.className = `assign-source${item.kind === "SFX" ? " audio" : ""}`;
-      source.draggable = true;
-      if (item.preview) source.style.backgroundImage = `url(${item.preview})`;
-      source.innerHTML = `<span class="kind">${item.kind}</span><span class="name"></span>`;
-      source.querySelector<HTMLElement>(".name")!.textContent = item.file.name;
-      source.addEventListener("dragstart", (event) => {
-        source.classList.add("dragging");
-        if (!event.dataTransfer) return;
-        event.dataTransfer.effectAllowed = "copyMove";
-        event.dataTransfer.setData("text/pending-id", String(item.id));
-      });
-      source.addEventListener("dragend", () => source.classList.remove("dragging"));
-      assignSources.appendChild(source);
-    }
-    this.updateTargets();
-    if (!this.pendingAssignments.length && !this.panelWasHiddenBeforeAssign) panel.classList.remove("hidden");
-  }
-
-  /** 各割り当て先へ現在の画像と音声名を反映する */
-  private updateTargets(): void {
-    const { assignTargets, slotElements } = this.options.ui;
-    const targets = [...assignTargets.children] as HTMLElement[];
-    targets.forEach((target, index) => {
-      target.style.backgroundImage = slotElements[index]?.style.backgroundImage ?? "";
-      const names: string[] = [];
-      const slot = this.options.slots.get(index);
-      if (slot.texture) names.push(`${slot.isGif ? "GIF" : "IMG"} ${slot.name}`);
-      if (slot.audioBuffer) names.push(`SFX ${slot.audioName}`);
-      const label = target.querySelector("small");
-      if (label) label.textContent = names.join(" + ") || "EMPTY";
-    });
   }
 
   /** 未割り当て素材をIDで取り出して指定スロットへ移す */
@@ -259,7 +139,7 @@ export class MediaAssignmentController {
     if (item.kind === "SFX") await this.assignAudio(slotIndex, item.file);
     else await this.assignFile(slotIndex, item.file);
     this.options.log(`${item.kind} → ${slotIndex + 1} ${item.file.name}`);
-    this.renderOverlay();
+    this.view.renderOverlay(this.pendingAssignments, this.panelWasHiddenBeforeAssign);
   }
 
   /** 複数素材を画像と音声ごとに1番から順番に割り当てる */

@@ -4,6 +4,7 @@ import { playEffect, type ActorPlacement, type EffectHost } from "../effects";
 import type { SlotStore } from "../media/SlotStore";
 import { AnimationScheduler } from "../services/AnimationScheduler";
 import type { EffectId } from "../types";
+import { calculateGravityMotion } from "./gravityMotion";
 
 export interface LaneLayout {
   column: number;
@@ -113,26 +114,11 @@ export class ForegroundRenderer implements EffectHost {
     this.slots.activateGif(slot, start + duration + 100);
     this.presenceUntilValue = Math.max(this.presenceUntilValue, start + duration);
     this.animate(duration, (progress) => {
-      // 同じ放物線を時間変換してゆっくり上昇し素早く落下する重さを作る
-      const risePower = 1.6;
-      const fallPower = 0.72;
-      const timeBias = 1.4783532205046865;
-      const rising = Math.pow(Math.max(0, progress), risePower);
-      const falling = timeBias * Math.pow(Math.max(0, 1 - progress), fallPower);
-      const position = rising + falling > 0 ? rising / (rising + falling) : 1;
-      const x = startX + (endX - startX) * position;
-      const y = startY - 4 * arcHeight * position * (1 - position);
-      const motionPhase = 2 * position - 1;
-      const stretch = position < 0.5
-        ? 0.012 * (position / 0.5)
-        : Math.min(0.075, Math.pow((position - 0.5) / 0.5, 1.5) * 0.075);
-      const scaleX = 1 - stretch * 0.22;
-      const scaleY = 1 + stretch;
-      const alpha = progress < 0.1 ? progress / 0.1 : progress > 0.96 ? (1 - progress) / 0.04 : 1;
-      sprite.position.set(x, y);
-      sprite.rotation = motionPhase * 0.008;
-      sprite.scale.set(baseScale * scaleX, baseScale * scaleY);
-      sprite.alpha = Math.max(0, Math.min(1, alpha));
+      const motion = calculateGravityMotion({ progress, startX, endX, startY, arcHeight, baseScale });
+      sprite.position.set(motion.x, motion.y);
+      sprite.rotation = motion.rotation;
+      sprite.scale.set(motion.scaleX, motion.scaleY);
+      sprite.alpha = motion.alpha;
     }, () => this.releaseFxSprite(sprite), () => !sprite.destroyed);
     return true;
   }

@@ -10,6 +10,7 @@ import { StageRenderer } from "./rendering/StageRenderer";
 import { EFFECTS, type AppAction, type EffectId } from "./types";
 import { VjUiController } from "./ui/VjUiController";
 import { VjUiBindings } from "./ui/VjUiBindings";
+import { createVjUiActions } from "./ui/createVjUiActions";
 
 export class VJApp {
   readonly app = new Application();
@@ -249,57 +250,21 @@ export class VJApp {
       uploadTexture: (texture) => this.app.renderer.prepare.upload(texture),
       log: (message) => this.logAction(message),
     });
-    new VjUiBindings(host, this.uiController, {
+    const actions = createVjUiActions({
+      app: this.app,
+      clock: this.clock,
+      cueEngine: this.cueEngine,
+      router: this.router,
+      slots: this.slotStore,
+      stage: this.stageRenderer,
+      assignments: this.mediaAssignments,
       handleAction: (action) => this.handleAction(action),
-      triggerCue: (cue, latchToggle) => {
-        this.slotStore.resumeAudio();
-        this.cueEngine.trigger(cue, 1, latchToggle);
-      },
       adjustScale: (delta, individual) => this.adjustActiveScale(delta, individual),
       moveAnchor: (dx, dy, individual) => this.moveActiveAnchor(dx, dy, individual),
       selectSlot: (index, shouldLog) => this.selectSlot(index, shouldLog),
-      setBpm: (value) => {
-        this.clock.setBpm(value);
-        this.logAction(`BPM ${this.clock.bpm.toFixed(2)}`);
-        return this.clock.bpm;
-      },
-      tap: () => {
-        const bpm = this.clock.tap();
-        this.logAction(`TAP ${bpm.toFixed(2)}`);
-        return bpm;
-      },
-      sync: () => {
-        this.clock.sync();
-        this.logAction("SYNC");
-      },
-      cycleQuantize: () => this.cueEngine.cycleQuantize(),
-      setOffset: (value) => {
-        this.clock.setOffsetMs(value);
-        this.logAction(`OFFSET ${this.clock.offsetMs}ms`);
-      },
-      setFpsLimit: (enabled) => {
-        this.app.ticker.maxFPS = enabled ? 60 : 0;
-        this.logAction(enabled ? "60 FPS LIMIT ON" : "60 FPS LIMIT OFF");
-      },
-      setBackgroundHidden: (hidden) => {
-        this.stageRenderer.setBackgroundVisible(!hidden);
-        this.logAction(hidden ? "BACKGROUND HIDDEN" : "BACKGROUND SHOWN");
-      },
-      setSkipAssign: (enabled) => {
-        this.mediaAssignments.setSkipAssign(enabled);
-        this.logAction(enabled ? "D&D ASSIGN SKIP ON" : "D&D ASSIGN SKIP OFF");
-      },
-      setVolume: (value) => {
-        this.slotStore.setVolume(value);
-        return this.slotStore.volume;
-      },
-      toggleRecord: () => this.cueEngine.toggleRecord(),
-      enableMidi: () => this.router.enableMidi(),
-      cancelDropOverlay: () => this.mediaAssignments.cancelDropOverlay(),
-      isAssignmentOpen: () => this.mediaAssignments.isOpen,
-      closeAssignment: () => this.mediaAssignments.close(true),
       log: (message) => this.logAction(message),
-    }, this.lifecycleAbort.signal);
+    });
+    new VjUiBindings(host, this.uiController, actions, this.lifecycleAbort.signal);
   }
 
   /** 操作対象のスロットを選択してパネル表示を更新する */
