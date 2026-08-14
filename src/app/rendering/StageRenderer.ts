@@ -191,8 +191,9 @@ export class StageRenderer {
     const pulse = 0.5 + 0.5 * Math.cos(this.clock.phase(now) * Math.PI * 2);
     this.backgroundShapes.forEach((shape, index) => {
       const lane = index % 4;
-      const speed = 0.018 + lane * 0.004;
-      shape.rotation += speed * (index % 2 ? 1 : -1);
+      const speed = 0.85 + lane * 0.18;
+      // フレームレートで回転速度が変わらないよう絶対時刻から角度を求める
+      shape.rotation = index * 0.45 + (now / 1000) * speed * (index % 2 ? 1 : -1);
       shape.x = this.width * (0.5 + 0.42 * Math.sin(beat * 0.22 + index * 1.7));
       shape.y = this.height * (0.5 + 0.42 * Math.cos(beat * 0.18 + index * 1.19));
       shape.scale.set(0.7 + pulse * 0.18 + (index % 4) * 0.09);

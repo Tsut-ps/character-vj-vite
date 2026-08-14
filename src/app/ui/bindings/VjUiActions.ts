@@ -10,7 +10,7 @@ export interface VjUiActions {
   tap(): number;
   sync(): void;
   cycleQuantize(): string;
-  setOffset(value: number): void;
+  setOffset(value: number): number;
   setFpsLimit(enabled: boolean): void;
   setBackgroundHidden(hidden: boolean): void;
   setSkipAssign(enabled: boolean): void;

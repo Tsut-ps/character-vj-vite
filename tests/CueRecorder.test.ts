@@ -43,3 +43,18 @@ test("clearですべての録音状態を破棄する", () => {
   assert.equal(recorder.isLooping, false);
   assert.deepEqual(recorder.collectDueEvents(20), []);
 });
+
+// 長時間停止後に無制限の過去イベントを返さないことを確認する
+test("長時間停止後の追いつき再生数を制限する", () => {
+  const recorder = new CueRecorder(8);
+  recorder.start(0);
+  recorder.record(0, 0.5);
+  recorder.stop(8);
+  assert.equal(recorder.collectDueEvents(8000).length, 8);
+});
+
+// ゼロ長ループによる無限計算を早期に拒否することを確認する
+test("正でないループ長を拒否する", () => {
+  assert.throws(() => new CueRecorder(0), RangeError);
+  assert.throws(() => new CueRecorder(Number.NaN), RangeError);
+});

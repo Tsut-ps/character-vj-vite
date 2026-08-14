@@ -33,7 +33,7 @@ export class AudioManager {
   /** ブラウザに停止された音声コンテキストを再開する */
   resume(): void {
     if (!this.context) return;
-    if (this.context.state === "suspended") void this.context.resume();
+    if (this.context.state === "suspended") void this.context.resume().catch(() => undefined);
   }
 
   /** 音声ファイルをデコードして無音区間を除いた情報を返す */
@@ -65,7 +65,7 @@ export class AudioManager {
 
     const now = context.currentTime;
     const duration = Math.min(audio.duration, audio.buffer.duration - audio.start);
-    const level = Math.max(0.05, Math.min(1.25, strength));
+    const level = Number.isFinite(strength) ? Math.max(0.05, Math.min(1.25, strength)) : 1;
     // 切り出し境界のクリックノイズを抑えつつ短音を潰さない長さでフェードする
     const fade = Math.min(0.003, duration * 0.2);
     gain.gain.setValueAtTime(0, now);
@@ -74,12 +74,17 @@ export class AudioManager {
     gain.gain.linearRampToValueAtTime(0, now + duration);
 
     this.activeSources.add(source);
-    source.addEventListener("ended", () => this.activeSources.delete(source), { once: true });
+    source.addEventListener("ended", () => {
+      this.activeSources.delete(source);
+      source.disconnect();
+      gain.disconnect();
+    }, { once: true });
     source.start(now, audio.start, duration);
   }
 
   /** マスター音量を0から4の範囲で更新する */
   setVolume(value: number): void {
+    if (!Number.isFinite(value)) return;
     this.volumeValue = Math.max(0, Math.min(4, value));
     if (!this.masterGain || !this.context) return;
 
@@ -95,6 +100,17 @@ export class AudioManager {
       try { source.stop(); } catch { /* 停止済みなら何もしない */ }
     }
     this.activeSources.clear();
+  }
+
+  /** 再生ノードと音声コンテキストを破棄する */
+  destroy(): void {
+    this.stopAll();
+    this.masterGain?.disconnect();
+    this.masterGain = null;
+    const context = this.context;
+    this.context = null;
+    // close失敗を未処理Promiseとして残さず破棄処理自体は継続する
+    if (context && context.state !== "closed") void context.close().catch(() => undefined);
   }
 
   /** 必要になるまで生成しない音声コンテキストを返す */

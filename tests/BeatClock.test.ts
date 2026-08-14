@@ -15,6 +15,15 @@ test("BPMと遅延補正を許容範囲へ制限する", () => {
   assert.equal(clock.offsetMs, -300);
 });
 
+// 空欄由来のNaNでクロック状態が壊れないことを確認する
+test("不正なBPMと遅延補正を無視する", () => {
+  const clock = new BeatClock();
+  clock.setBpm(Number.NaN);
+  clock.setOffsetMs(Number.POSITIVE_INFINITY);
+  assert.equal(clock.bpm, 128);
+  assert.equal(clock.offsetMs, 0);
+});
+
 // 同期時刻が遅延補正を含めても拍頭になることを確認する
 test("syncした時刻を拍頭として扱う", () => {
   const clock = new BeatClock();

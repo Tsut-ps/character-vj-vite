@@ -1,5 +1,6 @@
 import type { VjUiController } from "../VjUiController";
 import type { VjUiActions } from "./VjUiActions";
+import { isFormControlTarget } from "../../dom";
 
 /** 実キーボードの表示調整とテンポ操作を接続する */
 export class GlobalShortcutBindings {
@@ -20,6 +21,8 @@ export class GlobalShortcutBindings {
   /** ウィンドウへキーボード操作を設定する */
   private setup(): void {
     window.addEventListener("keydown", (event) => {
+      // フォーム固有のキー操作を位置やサイズ調整へ変換しない
+      if (isFormControlTarget(event.target)) return;
       this.ui.setKeyVisual(event.code, true);
       if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.code)) {
         event.preventDefault();

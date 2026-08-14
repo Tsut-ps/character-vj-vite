@@ -37,7 +37,9 @@ export class PanelBindings {
       quantize.textContent = `Q ${this.actions.cycleQuantize()}`;
     }, { signal: this.signal });
     const offset = panel.querySelector<HTMLInputElement>("[data-field=offset]")!;
-    offset.addEventListener("change", () => this.actions.setOffset(Number(offset.value)), { signal: this.signal });
+    offset.addEventListener("change", () => {
+      offset.value = String(this.actions.setOffset(Number(offset.value)));
+    }, { signal: this.signal });
 
     const fpsLimit = panel.querySelector<HTMLInputElement>("[data-field=limit-fps]")!;
     fpsLimit.addEventListener("change", () => this.actions.setFpsLimit(fpsLimit.checked), { signal: this.signal });
@@ -69,8 +71,7 @@ export class PanelBindings {
     }, { signal: this.signal });
     panel.querySelector("[data-action=record]")!.addEventListener("click", () => this.actions.toggleRecord(), { signal: this.signal });
     panel.querySelector("[data-action=fullscreen]")!.addEventListener("click", () => {
-      this.actions.log("FULLSCREEN");
-      void document.documentElement.requestFullscreen?.();
+      void this.enterFullscreen();
     }, { signal: this.signal });
     panel.querySelector("[data-action=midi]")!.addEventListener("click", (event) => {
       void this.enableMidi(event.currentTarget as HTMLButtonElement);
@@ -86,6 +87,18 @@ export class PanelBindings {
     } catch (error) {
       button.textContent = error instanceof Error ? error.message : "MIDI ERROR";
       this.actions.log("MIDI ERROR");
+    }
+  }
+
+  /** 全画面化の拒否を未処理Promiseにせず操作ログへ反映する */
+  private async enterFullscreen(): Promise<void> {
+    try {
+      if (!document.documentElement.requestFullscreen) throw new Error("Fullscreen API is unavailable");
+      await document.documentElement.requestFullscreen();
+      this.actions.log("FULLSCREEN");
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "FULLSCREEN ERROR";
+      this.actions.log(`FULLSCREEN ERROR / ${detail}`);
     }
   }
 }

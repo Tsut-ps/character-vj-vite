@@ -1,4 +1,5 @@
 import type { VjUiElements } from "../ui/createVjUi";
+import { detectMediaFileKind } from "./mediaFileKind";
 
 export interface FileDropActions {
   assignFile(index: number, file: File): void;
@@ -104,10 +105,11 @@ export class FileDropController {
       document.body.classList.add("is-dragging");
     }, { signal: this.signal });
     this.host.addEventListener("dragleave", (event) => {
-      if (event.target === this.host) {
-        document.body.classList.remove("is-dragging");
-        this.dropOverlaySuppressed = false;
-      }
+      const nextTarget = event.relatedTarget;
+      // 子要素間の移動ではなくステージ外へ出た時だけドラッグ状態を解除する
+      if (nextTarget instanceof Node && this.host.contains(nextTarget)) return;
+      document.body.classList.remove("is-dragging");
+      this.dropOverlaySuppressed = false;
     }, { signal: this.signal });
     this.host.addEventListener("drop", (event) => {
       event.preventDefault();
@@ -124,6 +126,6 @@ export class FileDropController {
 
   /** 割り当て対象として扱える画像または音声か返す */
   private isSupported(file: File): boolean {
-    return file.type.startsWith("image/") || file.type.startsWith("audio/");
+    return detectMediaFileKind(file) !== null;
   }
 }

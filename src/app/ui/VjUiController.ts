@@ -23,6 +23,8 @@ export class VjUiController {
   private bpmHistory: Array<{ time: number; bpm: number }> = [{ time: performance.now(), bpm: 128 }];
   private lastBpmSample = 0;
   private lastHudHtml = "";
+  private flashFrame: number | null = null;
+  private flashTimer: number | null = null;
   private readonly host: HTMLElement;
 
   /** ホストへVJ用DOMを生成する */
@@ -94,12 +96,19 @@ export class VjUiController {
   /** 画面を瞬時に明るくしてフェードアウトさせる */
   flash(amount = 0.55): void {
     const flashElement = this.elements.flashElement;
+    if (this.flashFrame !== null) cancelAnimationFrame(this.flashFrame);
+    if (this.flashTimer !== null) window.clearTimeout(this.flashTimer);
+    flashElement.style.transition = "none";
     flashElement.style.opacity = String(Math.min(0.9, amount));
     // 不透明状態を一度描画してから遷移を付けないとフェードが開始されない
-    requestAnimationFrame(() => {
+    this.flashFrame = requestAnimationFrame(() => {
+      this.flashFrame = null;
       flashElement.style.transition = "opacity 180ms ease-out";
       flashElement.style.opacity = "0";
-      window.setTimeout(() => { flashElement.style.transition = "none"; }, 200);
+      this.flashTimer = window.setTimeout(() => {
+        this.flashTimer = null;
+        flashElement.style.transition = "none";
+      }, 200);
     });
   }
 
@@ -151,6 +160,10 @@ export class VjUiController {
 
   /** フラッシュと拍フィードバックを初期状態へ戻す */
   clearFeedback(): void {
+    if (this.flashFrame !== null) cancelAnimationFrame(this.flashFrame);
+    if (this.flashTimer !== null) window.clearTimeout(this.flashTimer);
+    this.flashFrame = null;
+    this.flashTimer = null;
     this.elements.flashElement.style.transition = "none";
     this.elements.flashElement.style.opacity = "0";
     this.elements.beatPulse.getAnimations().forEach((animation) => animation.cancel());
@@ -159,6 +172,7 @@ export class VjUiController {
 
   /** 生成したDOM要素をホストから取り除く */
   destroy(): void {
+    this.clearFeedback();
     const bpmGraph = this.elements.bpmGraphPath.closest(".bpm-graph");
     const roots: Array<Element | null> = [
       this.elements.flashElement,

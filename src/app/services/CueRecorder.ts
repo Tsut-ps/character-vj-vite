@@ -5,6 +5,8 @@ export interface RecordedCue {
   slot?: number;
 }
 
+const MAX_CATCH_UP_CYCLES = 8;
+
 /** 固定拍数のキュー録音とループ再生位置を管理する */
 export class CueRecorder {
   private readonly lengthBeats: number;
@@ -17,6 +19,9 @@ export class CueRecorder {
 
   /** 1ループの拍数を指定してレコーダーを作る */
   constructor(lengthBeats: number) {
+    if (!Number.isFinite(lengthBeats) || lengthBeats <= 0) {
+      throw new RangeError("Cue loop length must be positive");
+    }
     this.lengthBeats = lengthBeats;
   }
 
@@ -83,6 +88,9 @@ export class CueRecorder {
         // フレーム落ちで複数周期を跨いでも未再生の最初の周期から追跡する
         let cycle = Math.floor((from - this.loopStartBeat - event.beat) / this.lengthBeats) + 1;
         if (cycle < 0) cycle = 0;
+        const latestCycle = Math.floor((currentBeat - this.loopStartBeat - event.beat) / this.lengthBeats);
+        // 長時間停止後に過去の全周期を一括再生して画面と音声が固まるのを防ぐ
+        cycle = Math.max(cycle, latestCycle - MAX_CATCH_UP_CYCLES + 1);
         let target = this.loopStartBeat + event.beat + cycle * this.lengthBeats;
         while (target <= currentBeat + 1e-6) {
           if (target > from + 1e-6) due.push(event);

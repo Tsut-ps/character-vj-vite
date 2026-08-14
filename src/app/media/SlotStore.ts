@@ -1,7 +1,7 @@
 import type { Texture } from "pixi.js";
 import { createEmptySlot, type Slot } from "../models/Slot";
-import { AudioManager } from "../services/AudioManager";
-import { getGifFrameDurationMs, loadImageFile } from "../services/ImageLoader";
+import { AudioManager, type DecodedAudio } from "../services/AudioManager";
+import { getGifFrameDurationMs, loadImageFile, type LoadedImage } from "../services/ImageLoader";
 
 export interface SlotTransform {
   scale: number;
@@ -27,6 +27,8 @@ export class SlotStore {
   private commonTransform: SlotTransform = { scale: 1, anchorX: 0.5, anchorY: 0.5 };
   private resolvedTransforms: SlotTransform[];
   private fitScales: number[];
+  private imageAssignmentRevisions: number[];
+  private audioAssignmentRevisions: number[];
   private viewportWidth = 1280;
   private viewportHeight = 720;
   private audio = new AudioManager();
@@ -36,6 +38,8 @@ export class SlotStore {
     this.slots = Array.from({ length: count }, () => createEmptySlot());
     this.resolvedTransforms = Array.from({ length: count }, () => ({ scale: 1, anchorX: 0.5, anchorY: 0.5 }));
     this.fitScales = Array.from({ length: count }, () => 1);
+    this.imageAssignmentRevisions = Array.from({ length: count }, () => 0);
+    this.audioAssignmentRevisions = Array.from({ length: count }, () => 0);
   }
 
   /** スロット数を返す */
@@ -87,19 +91,39 @@ export class SlotStore {
     file: File,
     prepareTexture: (texture: Texture) => Promise<void>,
   ): Promise<ImageAssignment> {
-    const previous = this.get(index);
-    const loaded = await loadImageFile(file);
+    this.assertSlotIndex(index);
+    const revision = ++this.imageAssignmentRevisions[index];
+    let loaded: LoadedImage;
+    try {
+      loaded = await loadImageFile(file);
+    } catch (error) {
+      if (revision !== this.imageAssignmentRevisions[index]) {
+        throw new DOMException("Image assignment was superseded", "AbortError");
+      }
+      throw error;
+    }
+    if (revision !== this.imageAssignmentRevisions[index]) {
+      this.discardLoadedImage(loaded);
+      throw new DOMException("Image assignment was superseded", "AbortError");
+    }
     try {
       // 初回キューでGPU転送が発生して引っかからないよう先にアップロードする
       await prepareTexture(loaded.texture);
     } catch (error) {
       // GPU転送失敗時は新規リソースだけを解放して現在のスロットを維持する
-      URL.revokeObjectURL(loaded.objectUrl);
-      try { loaded.gifDecoder?.close?.(); } catch { /* デコーダーが既に閉じていれば何もしない */ }
+      this.discardLoadedImage(loaded);
+      if (revision !== this.imageAssignmentRevisions[index]) {
+        throw new DOMException("Image assignment was superseded", "AbortError");
+      }
       throw error;
+    }
+    if (revision !== this.imageAssignmentRevisions[index]) {
+      this.discardLoadedImage(loaded);
+      throw new DOMException("Image assignment was superseded", "AbortError");
     }
 
     // 新しい画像の準備完了後に古いリソースを解放して失敗時の表示を維持する
+    const previous = this.get(index);
     this.releaseImageResources(previous);
     this.slots[index] = {
       texture: loaded.texture,
@@ -107,6 +131,7 @@ export class SlotStore {
       objectUrl: loaded.objectUrl,
       isGif: loaded.isGif,
       gifDecoder: loaded.gifDecoder,
+      gifImage: loaded.gifImage,
       gifCanvas: loaded.gifCanvas,
       gifFrameIndex: 0,
       gifFrameCount: loaded.gifFrameCount,
@@ -133,7 +158,20 @@ export class SlotStore {
 
   /** 音声をデコードして指定スロットへ割り当てる */
   async assignAudio(index: number, file: File): Promise<AudioAssignment> {
-    const decoded = await this.audio.decode(file);
+    this.assertSlotIndex(index);
+    const revision = ++this.audioAssignmentRevisions[index];
+    let decoded: DecodedAudio;
+    try {
+      decoded = await this.audio.decode(file);
+    } catch (error) {
+      if (revision !== this.audioAssignmentRevisions[index]) {
+        throw new DOMException("Audio assignment was superseded", "AbortError");
+      }
+      throw error;
+    }
+    if (revision !== this.audioAssignmentRevisions[index]) {
+      throw new DOMException("Audio assignment was superseded", "AbortError");
+    }
     const slot = this.get(index);
     slot.audioBuffer = decoded.buffer;
     slot.audioName = decoded.name;
@@ -184,10 +222,24 @@ export class SlotStore {
   /** 表示中またはラッチ中のGIFだけ次フレームへ進める */
   updateAnimatedGifs(now: number, isLatched: (index: number) => boolean): void {
     this.slots.forEach((slot, index) => {
-      if (!slot.isGif || !slot.gifDecoder || !slot.gifCanvas || !slot.texture) return;
+      if (!slot.isGif || !slot.gifCanvas || !slot.texture) return;
+      if (!slot.gifDecoder && !slot.gifImage) return;
       const live = now <= slot.gifActiveUntil || isLatched(index);
       // 非表示GIFを止めて負荷を抑え同じデコーダーの並列decodeも防ぐ
-      if (!live || slot.gifDecoding || now < slot.gifNextAt || slot.gifFrameCount < 2) return;
+      if (!live || slot.gifDecoding || now < slot.gifNextAt) return;
+
+      if (slot.gifImage) {
+        const context = slot.gifCanvas.getContext("2d", { alpha: true });
+        if (context) {
+          context.clearRect(0, 0, slot.gifCanvas.width, slot.gifCanvas.height);
+          context.drawImage(slot.gifImage, 0, 0, slot.gifCanvas.width, slot.gifCanvas.height);
+          slot.texture.source.update();
+        }
+        // ネイティブGIFはフレーム時間を取得できないため描画更新だけ30 FPSへ制限する
+        slot.gifNextAt = now + 1000 / 30;
+        return;
+      }
+      if (!slot.gifDecoder || slot.gifFrameCount < 2) return;
 
       slot.gifDecoding = true;
       const nextFrame = (slot.gifFrameIndex + 1) % Math.max(1, slot.gifFrameCount);
@@ -248,7 +300,10 @@ export class SlotStore {
 
   /** 全スロットのメディアリソースと再生中音声を解放する */
   destroy(): void {
-    this.audio.stopAll();
+    // 読み込み完了待ちの旧処理が破棄後にスロットを書き換えないよう世代を進める
+    this.imageAssignmentRevisions = this.imageAssignmentRevisions.map((revision) => revision + 1);
+    this.audioAssignmentRevisions = this.audioAssignmentRevisions.map((revision) => revision + 1);
+    this.audio.destroy();
     for (const slot of this.slots) this.releaseImageResources(slot);
   }
 
@@ -282,5 +337,19 @@ export class SlotStore {
   private releaseImageResources(slot: Slot): void {
     if (slot.objectUrl) URL.revokeObjectURL(slot.objectUrl);
     try { slot.gifDecoder?.close?.(); } catch { /* デコーダーが既に閉じていれば何もしない */ }
+  }
+
+  /** 未割り当ての画像リソースをGPUを含めて破棄する */
+  private discardLoadedImage(loaded: LoadedImage): void {
+    loaded.texture.destroy(true);
+    URL.revokeObjectURL(loaded.objectUrl);
+    try { loaded.gifDecoder?.close?.(); } catch { /* デコーダーが既に閉じていれば何もしない */ }
+  }
+
+  /** 書き込み先が存在するスロット番号か検証する */
+  private assertSlotIndex(index: number): void {
+    if (!Number.isInteger(index) || index < 0 || index >= this.slots.length) {
+      throw new RangeError(`Slot index out of range: ${index}`);
+    }
   }
 }

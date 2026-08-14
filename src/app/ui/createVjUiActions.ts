@@ -53,6 +53,7 @@ export function createVjUiActions(dependencies: VjUiActionDependencies): VjUiAct
     setOffset: (value) => {
       clock.setOffsetMs(value);
       log(`OFFSET ${clock.offsetMs}ms`);
+      return clock.offsetMs;
     },
     setFpsLimit: (enabled) => {
       app.ticker.maxFPS = enabled ? 60 : 0;

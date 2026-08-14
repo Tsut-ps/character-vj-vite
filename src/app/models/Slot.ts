@@ -7,6 +7,7 @@ export interface Slot {
   objectUrl?: string;
   isGif: boolean;
   gifDecoder?: GifDecoderLike;
+  gifImage?: HTMLImageElement;
   gifCanvas?: HTMLCanvasElement;
   gifFrameIndex: number;
   gifFrameCount: number;

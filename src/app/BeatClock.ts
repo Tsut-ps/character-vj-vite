@@ -13,11 +13,14 @@ export class BeatClock {
 
   /** 拍位置を保ったままBPMを更新する */
   setBpm(value: number): void {
+    // 空欄などの不正値でクロック全体がNaNになるのを防ぐ
+    if (!Number.isFinite(value)) return;
     const clamped = Math.min(300, Math.max(30, value));
-    const beat = this.beatAt(performance.now());
+    const now = performance.now();
+    const beat = this.beatAt(now);
     this.bpmValue = clamped;
     // BPM変更で演出の拍位置が飛ばないよう原点を新しい拍長から逆算する
-    this.originMs = performance.now() - beat * this.msPerBeat;
+    this.originMs = now - beat * this.msPerBeat;
   }
 
   /** 入力遅延の補正値を返す */
@@ -27,6 +30,7 @@ export class BeatClock {
 
   /** 遅延補正を操作可能な範囲へ収めて設定する */
   setOffsetMs(value: number): void {
+    if (!Number.isFinite(value)) return;
     this.latencyOffsetMs = Math.min(300, Math.max(-300, value));
   }
 
