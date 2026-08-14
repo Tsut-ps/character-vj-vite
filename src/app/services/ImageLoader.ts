@@ -1,4 +1,4 @@
-import { Assets, Texture } from "pixi.js";
+import { Texture } from "pixi.js";
 
 export interface GifFrameLike {
   duration?: number | null;
@@ -51,6 +51,17 @@ export async function createPanelPreview(file: File, maxSize = 384): Promise<str
   return canvas.toDataURL("image/webp", 0.72);
 }
 
+/** Blob URLをブラウザでデコードしてPixiJSへ渡せる画像要素を返す */
+async function decodeImageElement(objectUrl: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.decoding = "async";
+    image.addEventListener("load", () => resolve(image), { once: true });
+    image.addEventListener("error", () => reject(new Error("Image decode failed")), { once: true });
+    image.src = objectUrl;
+  });
+}
+
 /** 画像ファイルを静止画またはWebCodecs GIFとして読み込む */
 export async function loadImageFile(file: File): Promise<LoadedImage> {
   const objectUrl = URL.createObjectURL(file);
@@ -60,8 +71,10 @@ export async function loadImageFile(file: File): Promise<LoadedImage> {
     const preview = await createPanelPreview(file);
     const isGif = file.type === "image/gif" || /\.gif$/i.test(file.name);
     if (!isGif) {
+      const image = await decodeImageElement(objectUrl);
       return {
-        texture: await Assets.load<Texture>(objectUrl),
+        // Assetsは拡張子のないBlob URLから形式を判定できないためデコード済み要素を直接渡す
+        texture: Texture.from(image),
         objectUrl,
         preview,
         isGif: false,
