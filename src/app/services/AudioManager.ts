@@ -6,7 +6,7 @@ export interface DecodedAudio {
   trimmedMs: number;
 }
 
-export interface PlayableAudio {
+interface PlayableAudio {
   buffer: AudioBuffer;
   start: number;
   duration: number;

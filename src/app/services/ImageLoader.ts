@@ -1,6 +1,6 @@
 import { Texture } from "pixi.js";
 
-export interface GifFrameLike {
+interface GifFrameLike {
   duration?: number | null;
   displayWidth?: number;
   displayHeight?: number;

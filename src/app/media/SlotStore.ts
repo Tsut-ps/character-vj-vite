@@ -3,20 +3,20 @@ import { createEmptySlot, type Slot } from "../models/Slot";
 import { AudioManager, type DecodedAudio } from "../services/AudioManager";
 import { getGifFrameDurationMs, loadImageFile, type LoadedImage } from "../services/ImageLoader";
 
-export interface SlotTransform {
+interface SlotTransform {
   scale: number;
   anchorX: number;
   anchorY: number;
 }
 
-export interface ImageAssignment {
+interface ImageAssignment {
   texture: Texture;
   preview: string;
   isGif: boolean;
   gifFrameCount: number;
 }
 
-export interface AudioAssignment {
+interface AudioAssignment {
   name: string;
   trimmedMs: number;
 }
@@ -40,11 +40,6 @@ export class SlotStore {
     this.fitScales = Array.from({ length: count }, () => 1);
     this.imageAssignmentRevisions = Array.from({ length: count }, () => 0);
     this.audioAssignmentRevisions = Array.from({ length: count }, () => 0);
-  }
-
-  /** スロット数を返す */
-  get length(): number {
-    return this.slots.length;
   }
 
   /** 指定スロットを読み取り用に返す */

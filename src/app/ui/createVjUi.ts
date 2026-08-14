@@ -23,7 +23,7 @@ export interface VjUiElements {
 }
 
 /** 必須の子要素を取得してテンプレート不整合を早期検出する */
-export function queryRequired<T extends Element>(root: ParentNode, selector: string): T {
+function queryRequired<T extends Element>(root: ParentNode, selector: string): T {
   const element = root.querySelector<T>(selector);
   if (!element) throw new Error(`Required UI element not found: ${selector}`);
   return element;

@@ -1,4 +1,4 @@
-export interface GravityMotionInput {
+interface GravityMotionInput {
   progress: number;
   startX: number;
   endX: number;
@@ -7,7 +7,7 @@ export interface GravityMotionInput {
   baseScale: number;
 }
 
-export interface GravityMotion {
+interface GravityMotion {
   x: number;
   y: number;
   rotation: number;

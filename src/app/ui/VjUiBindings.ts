@@ -5,8 +5,6 @@ import { PanelDragController } from "./bindings/PanelDragController";
 import type { VjUiActions } from "./bindings/VjUiActions";
 import type { VjUiController } from "./VjUiController";
 
-export type { VjUiActions } from "./bindings/VjUiActions";
-
 /** UIの各入力バインディングをまとめて初期化する */
 export class VjUiBindings {
   private readonly ui: VjUiController;

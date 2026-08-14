@@ -1,4 +1,4 @@
-export interface RecordedCue {
+interface RecordedCue {
   cue: number;
   beat: number;
   strength: number;

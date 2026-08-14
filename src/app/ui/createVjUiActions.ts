@@ -8,7 +8,7 @@ import type { StageRenderer } from "../rendering/StageRenderer";
 import type { AppAction } from "../types";
 import type { VjUiActions } from "./bindings/VjUiActions";
 
-export interface VjUiActionDependencies {
+interface VjUiActionDependencies {
   app: Application;
   clock: BeatClock;
   cueEngine: CueEngine;
@@ -75,7 +75,7 @@ export function createVjUiActions(dependencies: VjUiActionDependencies): VjUiAct
     enableMidi: () => router.enableMidi(),
     cancelDropOverlay: () => assignments.cancelDropOverlay(),
     isAssignmentOpen: () => assignments.isOpen,
-    closeAssignment: () => assignments.close(true),
+    closeAssignment: () => assignments.close(),
     log,
   };
 }

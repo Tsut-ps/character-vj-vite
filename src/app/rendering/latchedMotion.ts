@@ -11,7 +11,7 @@ export interface LatchedMotionInput {
   anchorY: number;
 }
 
-export interface LatchedMotion {
+interface LatchedMotion {
   x: number;
   y: number;
   scaleX: number;

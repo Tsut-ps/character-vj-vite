@@ -10,7 +10,7 @@ export interface SecretLane {
   count: number;
 }
 
-export interface CueEngineHost {
+interface CueEngineHost {
   hasCue(cue: number): boolean;
   hasImage(slot: number): boolean;
   randomImageSlot(): number | null;

@@ -1,7 +1,7 @@
 import type { EffectId } from "../types";
 import { createVjUi, type VjUiElements } from "./createVjUi";
 
-export interface HudState {
+interface HudState {
   bpm: number;
   bar: number;
   beat: number;
@@ -59,14 +59,9 @@ export class VjUiController {
     }
   }
 
-  /** 左右Shiftをガイド上の一つのキー表示へ正規化する */
-  keyVisualCode(code: string): string {
-    return code === "ShiftRight" ? "ShiftLeft" : code;
-  }
-
   /** 実キーまたは仮想キーの押下状態をガイドへ反映する */
   setKeyVisual(code: string, active: boolean): void {
-    const visualCode = this.keyVisualCode(code);
+    const visualCode = code === "ShiftRight" ? "ShiftLeft" : code;
     for (const element of this.elements.keyGuide.querySelectorAll<HTMLElement>(`[data-code="${visualCode}"]`)) {
       element.classList.toggle("active", active);
     }

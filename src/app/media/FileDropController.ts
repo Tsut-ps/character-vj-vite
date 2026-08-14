@@ -1,7 +1,7 @@
 import type { VjUiElements } from "../ui/createVjUi";
 import { detectMediaFileKind } from "./mediaFileKind";
 
-export interface FileDropActions {
+interface FileDropActions {
   assignFile(index: number, file: File): void;
   assignPending(id: string, index: number): void;
   handleFiles(files: File[], skipAssign: boolean): void;
@@ -119,13 +119,9 @@ export class FileDropController {
       if (target?.closest(".control-panel, .key-guide")) return;
       // 割り当て画面内の内部ドラッグを新規ファイルドロップとして処理しない
       if (event.dataTransfer?.getData("text/pending-id")) return;
-      const files = [...(event.dataTransfer?.files ?? [])].filter((file) => this.isSupported(file));
+      const files = [...(event.dataTransfer?.files ?? [])]
+        .filter((file) => detectMediaFileKind(file) !== null);
       if (files.length) this.actions.handleFiles(files, this.skipAssign);
     }, { signal: this.signal });
-  }
-
-  /** 割り当て対象として扱える画像または音声か返す */
-  private isSupported(file: File): boolean {
-    return detectMediaFileKind(file) !== null;
   }
 }

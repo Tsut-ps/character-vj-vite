@@ -8,7 +8,7 @@ import { MediaAssignmentView, type PendingAssignment } from "./MediaAssignmentVi
 import { detectMediaFileKind } from "./mediaFileKind";
 import type { SlotStore } from "./SlotStore";
 
-export interface MediaAssignmentOptions {
+interface MediaAssignmentOptions {
   host: HTMLElement;
   ui: VjUiElements;
   slots: SlotStore;
@@ -40,7 +40,7 @@ export class MediaAssignmentController {
       assignFile: (index, file) => this.runTask(`LOAD ${index + 1}`, () => this.assignFile(index, file)),
       assignPending: (id, index) => this.runTask(`ASSIGN ${index + 1}`, () => this.assignPendingToSlot(id, index)),
       handleFiles: (files, skipAssign) => this.handleDroppedFiles(files, skipAssign),
-      closeAssignment: () => this.close(true),
+      closeAssignment: () => this.close(),
       log: (message) => options.log(message),
     });
   }
@@ -87,9 +87,9 @@ export class MediaAssignmentController {
   }
 
   /** 未割り当て素材を破棄して通常画面へ戻す */
-  close(clear = true): void {
+  close(): void {
     this.pendingRevision += 1;
-    if (clear) this.pendingAssignments = [];
+    this.pendingAssignments = [];
     this.view.renderOverlay(this.pendingAssignments, this.panelWasHiddenBeforeAssign);
     this.options.log("D&D ASSIGN CLOSE");
   }
@@ -97,7 +97,7 @@ export class MediaAssignmentController {
   /** Enter操作で残り素材を破棄して割り当てを確定する */
   confirm(): void {
     const remaining = this.pendingAssignments.length;
-    this.close(true);
+    this.close();
     this.options.log(`D&D ASSIGN CONFIRM${remaining ? ` / SKIP ${remaining}` : ""}`);
   }
 
@@ -123,7 +123,7 @@ export class MediaAssignmentController {
   /** ドロップ素材を最大16件まで割り当て画面へ読み込む */
   private async openOverlay(files: File[]): Promise<void> {
     // 8スロットへ画像と音声を1件ずつ置ける最大数に制限する
-    const valid = files.filter((file) => this.isSupported(file)).slice(0, 16);
+    const valid = files.filter((file) => detectMediaFileKind(file) !== null).slice(0, 16);
     if (!valid.length) return;
     const revision = ++this.pendingRevision;
     const { panel } = this.options.ui;
@@ -185,11 +185,6 @@ export class MediaAssignmentController {
     await Promise.all(jobs);
     if (this.destroyed) return;
     this.options.selectSlot(images.length > 1 || audio.length > 1 ? 0 : selected);
-  }
-
-  /** 割り当て対象として扱える画像または音声か返す */
-  private isSupported(file: File): boolean {
-    return detectMediaFileKind(file) !== null;
   }
 
   /** 非同期イベントの失敗を操作ログへ集約して未処理Promiseを防ぐ */

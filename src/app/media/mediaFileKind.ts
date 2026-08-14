@@ -1,4 +1,4 @@
-export type MediaFileKind = "image" | "audio";
+type MediaFileKind = "image" | "audio";
 
 const IMAGE_EXTENSIONS = new Set(["avif", "bmp", "gif", "jfif", "jpeg", "jpg", "png", "svg", "webp"]);
 const AUDIO_EXTENSIONS = new Set(["aac", "flac", "m4a", "mp3", "oga", "ogg", "opus", "wav", "webm"]);

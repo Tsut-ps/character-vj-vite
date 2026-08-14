@@ -73,11 +73,6 @@ export class BeatClock {
     return ((beat % 1) + 1) % 1;
   }
 
-  /** 指定時刻が属する整数拍を返す */
-  beatNumber(now = performance.now()): number {
-    return Math.floor(this.beatAt(now));
-  }
-
   /** 指定時刻を小節番号と拍番号と拍内位相へ分解する */
   barBeat(now = performance.now()): { bar: number; beat: number; phase: number } {
     const absoluteBeat = Math.max(0, this.beatAt(now));

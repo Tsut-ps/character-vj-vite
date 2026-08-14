@@ -6,7 +6,7 @@ import { AnimationScheduler } from "../services/AnimationScheduler";
 import type { EffectId } from "../types";
 import { calculateGravityMotion } from "./gravityMotion";
 
-export interface LaneLayout {
+interface LaneLayout {
   column: number;
   count: number;
 }
