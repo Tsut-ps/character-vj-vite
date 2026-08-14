@@ -1,72 +1,24 @@
 import "pixi.js/prepare";
-import { Application, Assets, Container, Graphics, Sprite, Texture } from "pixi.js";
+import { Application, Container, Graphics, Sprite, Texture } from "pixi.js";
 import { BeatClock } from "./BeatClock";
 import { playEffect, type EffectHost } from "./effects";
 import { InputRouter } from "./InputRouter";
+import { createEmptySlot, type Slot } from "./models/Slot";
+import { AnimationScheduler } from "./services/AnimationScheduler";
+import { AudioManager } from "./services/AudioManager";
+import { CueRecorder } from "./services/CueRecorder";
+import {
+  createPanelPreview,
+  getGifFrameDurationMs,
+  loadImageFile,
+} from "./services/ImageLoader";
 import { EFFECT_LABELS, EFFECTS, type AppAction, type EffectId, type Quantize } from "./types";
+import {
+  createVjUi,
+  queryRequired,
+} from "./ui/createVjUi";
 
 const RECORD_BEATS = 8;
-
-interface GifFrameLike {
-  duration?: number | null;
-  displayWidth?: number;
-  displayHeight?: number;
-  codedWidth?: number;
-  codedHeight?: number;
-  close?: () => void;
-}
-
-interface GifDecoderLike {
-  tracks: {
-    ready: Promise<void>;
-    selectedTrack?: { frameCount?: number } | null;
-  };
-  decode(options: { frameIndex: number; completeFramesOnly?: boolean }): Promise<{ image: GifFrameLike }>;
-  close?: () => void;
-}
-
-type GifDecoderConstructor = {
-  new (init: { data: Uint8Array; type: string; preferAnimation?: boolean }): GifDecoderLike;
-  isTypeSupported?: (type: string) => Promise<boolean>;
-};
-
-interface Slot {
-  texture: Texture | null;
-  name: string;
-  objectUrl?: string;
-  isGif?: boolean;
-  gifDecoder?: GifDecoderLike;
-  gifCanvas?: HTMLCanvasElement;
-  gifFrameIndex?: number;
-  gifFrameCount?: number;
-  gifNextAt?: number;
-  gifDecoding?: boolean;
-  gifActiveUntil?: number;
-  audioBuffer: AudioBuffer | null;
-  audioName: string;
-  audioStart: number;
-  audioDuration: number;
-  scaleOffset: number;
-  anchorXOffset: number;
-  anchorYOffset: number;
-}
-
-/** パネル表示用に画像を縮小して軽量なWebPへ変換する */
-async function makePanelPreview(file: File, maxSize = 384): Promise<string> {
-  const bitmap = await createImageBitmap(file);
-  const ratio = Math.min(1, maxSize / Math.max(bitmap.width, bitmap.height));
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.max(1, Math.round(bitmap.width * ratio));
-  canvas.height = Math.max(1, Math.round(bitmap.height * ratio));
-  const ctx = canvas.getContext("2d", { alpha: true });
-  if (ctx) {
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "high";
-    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-  }
-  bitmap.close();
-  return canvas.toDataURL("image/webp", 0.72);
-}
 
 export class VJApp implements EffectHost {
   readonly app = new Application();
@@ -92,30 +44,15 @@ export class VJApp implements EffectHost {
     alpha: number;
   }> = [];
   private characterPresenceUntil = 0;
-  private slots: Slot[] = Array.from({ length: 8 }, () => ({
-    texture: null,
-    name: "empty",
-    isGif: false,
-    gifFrameIndex: 0,
-    gifFrameCount: 1,
-    gifNextAt: 0,
-    gifDecoding: false,
-    gifActiveUntil: 0,
-    audioBuffer: null,
-    audioName: "",
-    audioStart: 0,
-    audioDuration: 0,
-    scaleOffset: 0,
-    anchorXOffset: 0,
-    anchorYOffset: 0,
-  }));
+  private slots: Slot[] = Array.from({ length: 8 }, () => createEmptySlot());
   private commonTransform = { scale: 1, anchorX: 0.5, anchorY: 0.5 };
   private selectedSlot = 0;
   private activeSlot: number | null = null;
   private quantize: Quantize = "1/8";
   private clock = new BeatClock();
   private router = new InputRouter((action) => this.handleAction(action));
-  private scheduled = new Set<number>();
+  private animation = new AnimationScheduler();
+  private audio = new AudioManager();
   private panel!: HTMLElement;
   private slotElements: HTMLElement[] = [];
   private hud!: HTMLElement;
@@ -125,13 +62,7 @@ export class VJApp implements EffectHost {
   private heldInputs = new Map<string, { cue: number; strength: number; startedMs: number; lastBeat: number }>();
   private latchedCues = new Map<number, { strength: number; lastBeat: number }>();
   private cueButtons: HTMLButtonElement[] = [];
-  private recording = false;
-  private recordStartBeat = 0;
-  private recordedEvents: Array<{ cue: number; beat: number; strength: number; slot?: number }> = [];
-  private loopActive = false;
-  private loopLengthBeats = 0;
-  private loopStartBeat = 0;
-  private loopLastBeat = 0;
+  private recorder = new CueRecorder(RECORD_BEATS);
   private recordButton!: HTMLButtonElement;
   private bpmGraphPath!: SVGPathElement;
   private bpmGraphValue!: HTMLElement;
@@ -142,23 +73,12 @@ export class VJApp implements EffectHost {
   private virtualShift = false;
   private actionMessages: string[] = [];
   private resetGeneration = 0;
-  private tweens: Array<{
-    start: number;
-    duration: number;
-    update: (t: number) => void;
-    complete?: () => void;
-    isActive: () => boolean;
-  }> = [];
   private fxPool: Sprite[] = [];
   private backgroundCharacterPool: Sprite[] = [];
   private resolvedTransforms = Array.from({ length: 8 }, () => ({ scale: 1, anchorX: 0.5, anchorY: 0.5 }));
   private fitScales = Array.from({ length: 8 }, () => 1);
   private lastHudUpdate = 0;
   private lastHudHtml = "";
-  private audioContext: AudioContext | null = null;
-  private audioMasterGain: GainNode | null = null;
-  private masterVolume = 1;
-  private activeAudioSources = new Set<AudioBufferSourceNode>();
   private limitFps60 = false;
   private hideBackground = false;
   private skipAssign = false;
@@ -200,7 +120,7 @@ export class VJApp implements EffectHost {
       const now = performance.now();
       this.router.pollGamepads();
       this.updateAnimatedGifs(now);
-      this.updateTweens(now);
+      this.animation.update(now);
       this.updateAutoHold(now);
       this.updateRecording(now);
       this.updateLoop(now);
@@ -318,25 +238,7 @@ export class VJApp implements EffectHost {
     complete?: () => void,
     isActive: () => boolean = () => true,
   ): void {
-    this.tweens.push({ start: performance.now(), duration: Math.max(1, duration), update, complete, isActive });
-  }
-
-  /** 登録済みアニメーションを現在時刻まで進める */
-  private updateTweens(now: number): void {
-    // 途中削除しても未処理要素の添字がずれないよう末尾から走査する
-    for (let index = this.tweens.length - 1; index >= 0; index -= 1) {
-      const tween = this.tweens[index];
-      if (!tween.isActive()) {
-        this.tweens.splice(index, 1);
-        continue;
-      }
-      const t = Math.min(1, (now - tween.start) / tween.duration);
-      tween.update(t);
-      if (t >= 1) {
-        this.tweens.splice(index, 1);
-        tween.complete?.();
-      }
-    }
+    this.animation.animate(duration, update, complete, isActive);
   }
 
   /** プールから演出用スプライトを取得して初期状態へ戻す */
@@ -388,11 +290,7 @@ export class VJApp implements EffectHost {
 
   /** 後から一括解除できる遅延処理を登録する */
   schedule(callback: () => void, delayMs: number): void {
-    const timer = window.setTimeout(() => {
-      this.scheduled.delete(timer);
-      callback();
-    }, Math.max(0, delayMs));
-    this.scheduled.add(timer);
+    this.animation.schedule(callback, delayMs);
   }
 
   /** 画面を瞬時に明るくしてフェードアウトさせる */
@@ -406,107 +304,30 @@ export class VJApp implements EffectHost {
     });
   }
 
-  /** ユーザー操作後に使う音声コンテキストとマスターゲインを遅延生成する */
-  private ensureAudioContext(): AudioContext {
-    if (!this.audioContext) {
-      this.audioContext = new AudioContext({ latencyHint: "interactive" });
-      this.audioMasterGain = this.audioContext.createGain();
-      this.audioMasterGain.gain.value = this.masterVolume;
-      this.audioMasterGain.connect(this.audioContext.destination);
-    }
-    return this.audioContext;
-  }
-
-  /** ブラウザに停止された音声コンテキストを再開する */
-  private resumeAudio(): void {
-    if (!this.audioContext) return;
-    if (this.audioContext.state === "suspended") void this.audioContext.resume();
-  }
-
-  /** 音声の先頭と末尾にある無音を除いた再生範囲を求める */
-  private findTrimRange(buffer: AudioBuffer): { start: number; duration: number; trimmedMs: number } {
-    const frames = buffer.length;
-    if (!frames) return { start: 0, duration: 0, trimmedMs: 0 };
-
-    let peak = 0;
-    for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
-      const data = buffer.getChannelData(channel);
-      for (let i = 0; i < frames; i += 1) {
-        const value = Math.abs(data[i]);
-        if (value > peak) peak = value;
-      }
-    }
-    if (peak < 1e-7) return { start: 0, duration: buffer.duration, trimmedMs: 0 };
-
-    // 小さいSFXを残しつつディザやノイズを有音扱いしないよう相対閾値と絶対下限を併用する
-    const threshold = Math.max(0.0005, peak * 0.003);
-    let first = frames;
-    let last = -1;
-    for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
-      const data = buffer.getChannelData(channel);
-      let channelFirst = 0;
-      while (channelFirst < frames && Math.abs(data[channelFirst]) < threshold) channelFirst += 1;
-      let channelLast = frames - 1;
-      while (channelLast >= 0 && Math.abs(data[channelLast]) < threshold) channelLast -= 1;
-      if (channelFirst < first) first = channelFirst;
-      if (channelLast > last) last = channelLast;
-    }
-    if (last < first) return { start: 0, duration: buffer.duration, trimmedMs: 0 };
-
-    // 急な切断でクリックノイズが出ないよう有音区間の前後へ3ms残す
-    const paddingFrames = Math.round(buffer.sampleRate * 0.003);
-    first = Math.max(0, first - paddingFrames);
-    last = Math.min(frames - 1, last + paddingFrames);
-    const start = first / buffer.sampleRate;
-    const duration = Math.max(1 / buffer.sampleRate, (last - first + 1) / buffer.sampleRate);
-    const trimmedMs = Math.max(0, (buffer.duration - duration) * 1000);
-    return { start, duration, trimmedMs };
-  }
-
   /** 音声ファイルをデコードして指定スロットへ割り当てる */
   private async assignAudioFile(index: number, file: File): Promise<void> {
     if (!file.type.startsWith("audio/")) return;
-    const context = this.ensureAudioContext();
-    this.resumeAudio();
-    const decoded = await context.decodeAudioData(await file.arrayBuffer());
-    const trim = this.findTrimRange(decoded);
+    const decoded = await this.audio.decode(file);
     const slot = this.slots[index];
-    slot.audioBuffer = decoded;
-    slot.audioName = file.name;
-    slot.audioStart = trim.start;
-    slot.audioDuration = trim.duration;
+    slot.audioBuffer = decoded.buffer;
+    slot.audioName = decoded.name;
+    slot.audioStart = decoded.start;
+    slot.audioDuration = decoded.duration;
     const el = this.slotElements[index];
     const audioLabel = el.querySelector<HTMLElement>("[data-audio]");
     if (audioLabel) audioLabel.textContent = `SFX ${file.name.replace(/\.[^.]+$/, "").slice(0, 10)}`;
-    this.logAction(`SFX ${index + 1} ${file.name} / TRIM ${Math.round(trim.trimmedMs)}ms`);
+    this.logAction(`SFX ${index + 1} ${file.name} / TRIM ${Math.round(decoded.trimmedMs)}ms`);
   }
 
   /** 指定スロットのトリム済み音声を入力強度に応じて再生する */
   private playCueAudio(index: number, strength = 1): void {
     const slot = this.slots[index];
     if (!slot?.audioBuffer || slot.audioDuration <= 0) return;
-    const context = this.ensureAudioContext();
-    if (context.state === "suspended") void context.resume();
-
-    const source = context.createBufferSource();
-    const gain = context.createGain();
-    source.buffer = slot.audioBuffer;
-    source.connect(gain);
-    gain.connect(this.audioMasterGain ?? context.destination);
-
-    const now = context.currentTime;
-    const duration = Math.min(slot.audioDuration, slot.audioBuffer.duration - slot.audioStart);
-    const level = Math.max(0.05, Math.min(1.25, strength));
-    // 切り出し境界のクリックノイズを抑えつつ短音を潰さない長さでフェードする
-    const fade = Math.min(0.003, duration * 0.2);
-    gain.gain.setValueAtTime(0, now);
-    gain.gain.linearRampToValueAtTime(level, now + fade);
-    if (duration > fade * 2) gain.gain.setValueAtTime(level, now + duration - fade);
-    gain.gain.linearRampToValueAtTime(0, now + duration);
-
-    this.activeAudioSources.add(source);
-    source.addEventListener("ended", () => this.activeAudioSources.delete(source), { once: true });
-    source.start(now, slot.audioStart, duration);
+    this.audio.play({
+      buffer: slot.audioBuffer,
+      start: slot.audioStart,
+      duration: slot.audioDuration,
+    }, strength);
   }
 
   /** 共通入力アクションを解除やラッチやキュー発火へ振り分ける */
@@ -533,7 +354,7 @@ export class VJApp implements EffectHost {
 
     // 同じ物理入力の重複downを無視して長押し状態を一つに保つ
     if (this.heldInputs.has(action.sourceId)) return;
-    this.resumeAudio();
+    this.audio.resume();
     if (action.cue === 8 && this.randomLoadedSlot() === null) return;
     if (action.cue !== 8 && !this.slots[action.cue]?.texture && !this.slots[action.cue]?.audioBuffer) return;
 
@@ -551,7 +372,7 @@ export class VJApp implements EffectHost {
   /** 入力フィードバックを即時表示してキューを拍境界へ予約する */
   private triggerCue(cue: number, strength = 1, shouldLog = true): void {
     if (!this.slots[cue]?.texture && !this.slots[cue]?.audioBuffer) return;
-    this.resumeAudio();
+    this.audio.resume();
     const effect = EFFECTS[cue];
     if (shouldLog) this.logAction(`CUE ${cue + 1} ${EFFECT_LABELS[effect]}`);
     this.immediateFeedback(effect);
@@ -571,7 +392,7 @@ export class VJApp implements EffectHost {
     const effect = EFFECTS[cue];
     const slot = this.slots[cue];
     if (!effect || (!slot?.texture && !slot?.audioBuffer)) return;
-    if (this.recording && allowRecord) this.recordCue(cue, strength);
+    if (this.recorder.isRecording && allowRecord) this.recordCue(cue, strength);
     if (slot.isGif) slot.gifActiveUntil = Math.max(slot.gifActiveUntil ?? 0, performance.now() + 900);
     this.playCueAudio(cue, strength);
     if (!slot.texture || !this.activateSlot(cue)) return;
@@ -622,7 +443,7 @@ export class VJApp implements EffectHost {
     this.activeSlot = slot;
     this.setAmbientSlot(slot);
     this.seedBackgroundCharacters(slot);
-    if (this.recording && allowRecord) this.recordCue(8, 1, slot);
+    if (this.recorder.isRecording && allowRecord) this.recordCue(8, 1, slot);
 
     const sprite = this.acquireFxSprite(texture);
     // 9番演出を通常アクターやラッチ列や他の演出より常に前面へ出す
@@ -679,10 +500,7 @@ export class VJApp implements EffectHost {
 
   /** 録音開始からの相対拍位置へキューを記録する */
   private recordCue(cue: number, strength = 1, slot?: number): void {
-    if (!this.recording) return;
-    // 終端ちょうどのイベントが次ループ先頭と二重発火しないよう区間内へ収める
-    const beat = Math.min(RECORD_BEATS - 0.000001, Math.max(0, this.clock.beatAt() - this.recordStartBeat));
-    this.recordedEvents.push(slot === undefined ? { cue, beat, strength } : { cue, beat, strength, slot });
+    this.recorder.record(cue, this.clock.beatAt(), strength, slot);
   }
 
   /** 長押しとラッチ中のキューを拍ごとに自動発火する */
@@ -733,7 +551,7 @@ export class VJApp implements EffectHost {
         }
         this.immediateFeedback(EFFECTS[cue]);
         this.logAction(`SHIFT AUTO ${cue + 1}`);
-        if (this.recording) this.recordCue(cue, latched.strength);
+        if (this.recorder.isRecording) this.recordCue(cue, latched.strength);
         this.playCueAudio(cue, latched.strength);
         this.seedBackgroundCharacters(cue);
         if (cue === 3) this.shake(10 * latched.strength, 150);
@@ -746,7 +564,7 @@ export class VJApp implements EffectHost {
   private toggleLatch(cue: number, strength = 1): void {
     const slot = cue === 8 ? null : this.slots[cue];
     if (cue === 8 ? this.randomLoadedSlot() === null : (!slot?.texture && !slot?.audioBuffer)) return;
-    this.resumeAudio();
+    this.audio.resume();
     if (this.latchedCues.has(cue)) {
       this.latchedCues.delete(cue);
       this.logAction(`SHIFT AUTO ${cue + 1} OFF`);
@@ -795,103 +613,62 @@ export class VJApp implements EffectHost {
   /** 2小節録音の開始または終了を切り替える */
   private toggleRecord(): void {
     const beat = this.clock.beatAt();
-    if (this.recording) {
-      this.finishRecord(this.recordStartBeat + RECORD_BEATS);
+    if (this.recorder.isRecording) {
+      this.recorder.stop(beat);
+      this.handleRecordStopped();
       return;
     }
-    this.recording = true;
-    this.recordedEvents = [];
-    this.recordStartBeat = beat;
-    this.loopActive = false;
-    this.loopLengthBeats = RECORD_BEATS;
-    this.loopStartBeat = beat + RECORD_BEATS;
-    this.loopLastBeat = beat;
+    this.recorder.start(beat);
     this.updateRecordButton();
     this.logAction("REC START / 2 BARS");
   }
 
-  /** 録音を終了してイベントがあれば固定長ループを開始する */
-  private finishRecord(endBeat = this.recordStartBeat + RECORD_BEATS): void {
-    if (!this.recording) return;
-    this.recording = false;
-    this.loopLengthBeats = RECORD_BEATS;
-    this.loopActive = this.recordedEvents.length > 0;
-    this.loopStartBeat = endBeat;
-    // 終了境界のイベントを最初のループ走査で取りこぼさないよう微小量だけ戻す
-    this.loopLastBeat = Math.min(this.clock.beatAt(), endBeat) - 1e-5;
+  /** 録音終了をボタンと操作ログへ反映する */
+  private handleRecordStopped(): void {
     this.updateRecordButton();
-    this.logAction(this.loopActive ? "REC END → LOOP 2 BARS" : "REC END / EMPTY");
+    this.logAction(this.recorder.isLooping ? "REC END → LOOP 2 BARS" : "REC END / EMPTY");
   }
 
   /** 規定の8拍へ到達した録音を自動終了する */
   private updateRecording(now: number): void {
-    if (this.recording && this.clock.beatAt(now) >= this.recordStartBeat + RECORD_BEATS) {
-      this.finishRecord(this.recordStartBeat + RECORD_BEATS);
-    }
+    if (this.recorder.finishIfNeeded(this.clock.beatAt(now))) this.handleRecordStopped();
   }
 
   /** 録音とループ状態を操作ボタンへ反映する */
   private updateRecordButton(): void {
     if (!this.recordButton) return;
-    this.recordButton.classList.toggle("recording", this.recording);
-    this.recordButton.textContent = this.recording
+    this.recordButton.classList.toggle("recording", this.recorder.isRecording);
+    this.recordButton.textContent = this.recorder.isRecording
       ? "● REC 2 BARS [R]"
-      : this.loopActive
+      : this.recorder.isLooping
         ? "LOOP 2 BARS [R]"
         : "REC [R]";
   }
 
   /** 前回更新から現在までに跨いだ録音イベントを再生する */
   private updateLoop(now: number): void {
-    if (!this.loopActive || this.recording || !this.recordedEvents.length) return;
-    const current = this.clock.beatAt(now);
-    if (current < this.loopLastBeat) {
-      this.loopLastBeat = current;
-      return;
-    }
-    const from = this.loopLastBeat;
-    if (current >= this.loopStartBeat) {
-      for (const event of this.recordedEvents) {
-        // フレーム落ちで複数周期を跨いでも未再生の最初の周期から追跡する
-        let cycle = Math.floor((from - this.loopStartBeat - event.beat) / this.loopLengthBeats) + 1;
-        if (cycle < 0) cycle = 0;
-        let target = this.loopStartBeat + event.beat + cycle * this.loopLengthBeats;
-        while (target <= current + 1e-6) {
-          if (target > from + 1e-6) {
-            if (event.cue === 8) {
-              this.immediateFeedback("pop");
-              this.logAction("LOOP 9 GRAVITY");
-              this.playSecretNow(event.slot ?? this.selectedSlot, false);
-            } else {
-              this.immediateFeedback(EFFECTS[event.cue]);
-              this.logAction(`LOOP ${event.cue + 1}`);
-              this.playCueNow(event.cue, event.strength, false);
-            }
-          }
-          cycle += 1;
-          target = this.loopStartBeat + event.beat + cycle * this.loopLengthBeats;
-        }
+    for (const event of this.recorder.collectDueEvents(this.clock.beatAt(now))) {
+      if (event.cue === 8) {
+        this.immediateFeedback("pop");
+        this.logAction("LOOP 9 GRAVITY");
+        this.playSecretNow(event.slot ?? this.selectedSlot, false);
+      } else {
+        this.immediateFeedback(EFFECTS[event.cue]);
+        this.logAction(`LOOP ${event.cue + 1}`);
+        this.playCueNow(event.cue, event.strength, false);
       }
     }
-    this.loopLastBeat = current;
   }
 
   /** 演出と音声と自動再生状態をまとめて初期化する */
   private clearAllAnimations(): void {
     this.resetGeneration += 1;
-    this.tweens = [];
-    for (const timer of this.scheduled) window.clearTimeout(timer);
-    this.scheduled.clear();
+    this.animation.clear();
     this.heldInputs.clear();
     this.latchedCues.clear();
     this.updateLatchUi();
 
-    this.recording = false;
-    this.recordedEvents = [];
-    this.loopActive = false;
-    this.loopLengthBeats = 0;
-    this.loopStartBeat = 0;
-    this.loopLastBeat = this.clock.beatAt();
+    this.recorder.clear(this.clock.beatAt());
     this.updateRecordButton();
 
     this.characterPresenceUntil = 0;
@@ -926,10 +703,7 @@ export class VJApp implements EffectHost {
         child.destroy();
       }
     }
-    for (const source of this.activeAudioSources) {
-      try { source.stop(); } catch { /* 停止済みなら何もしない */ }
-    }
-    this.activeAudioSources.clear();
+    this.audio.stopAll();
     this.root.position.set(0, 0);
     this.flashElement.style.transition = "none";
     this.flashElement.style.opacity = "0";
@@ -1257,7 +1031,7 @@ export class VJApp implements EffectHost {
 
   /** ガイド上のキー押下を実キーボードと同じ操作へ変換する */
   private virtualKeyDown(code: string, sourceId: string): boolean {
-    this.resumeAudio();
+    this.audio.resume();
     const cue = /^(?:Digit|Numpad)([1-9])$/.exec(code);
     if (cue) {
       this.handleAction({
@@ -1353,121 +1127,26 @@ export class VJApp implements EffectHost {
 
   /** HUDと操作パネルと割り当て画面を生成してイベントを接続する */
   private createUi(host: HTMLElement): void {
-    this.flashElement = document.createElement("div");
-    this.flashElement.className = "screen-flash";
-    host.appendChild(this.flashElement);
-
-    this.beatPulse = document.createElement("div");
-    this.beatPulse.className = "beat-pulse";
-    host.appendChild(this.beatPulse);
-
-    this.hud = document.createElement("div");
-    this.hud.className = "hud";
-    host.appendChild(this.hud);
-
-    const bpmGraph = document.createElement("div");
-    bpmGraph.className = "bpm-graph";
-    bpmGraph.innerHTML = `
-      <div class="bpm-graph-head"><span>BPM / 12s</span><b>128.00</b></div>
-      <svg viewBox="0 0 260 74" preserveAspectRatio="none" aria-hidden="true">
-        <line x1="0" y1="18.5" x2="260" y2="18.5"></line>
-        <line x1="0" y1="37" x2="260" y2="37"></line>
-        <line x1="0" y1="55.5" x2="260" y2="55.5"></line>
-        <path d=""></path>
-      </svg>
-    `;
-    host.appendChild(bpmGraph);
-    this.bpmGraphPath = bpmGraph.querySelector("path")!;
-    this.bpmGraphValue = bpmGraph.querySelector("b")!;
-
-    this.keyGuide = document.createElement("div");
-    this.keyGuide.className = "key-guide";
-    this.keyGuide.setAttribute("aria-label", "対応キーボードショートカット");
-    this.keyGuide.innerHTML = `
-      <div class="key-guide-head"><span>KEYBOARD</span><span>CLICK / HOLD</span></div>
-      <div class="key-guide-body">
-        <div class="key-main">
-          <div class="key-row"><button data-code="Escape" class="esc">ESC</button><button data-code="Digit1">1</button><button data-code="Digit2">2</button><button data-code="Digit3">3</button><button data-code="Digit4">4</button><button data-code="Digit5">5</button><button data-code="Digit6">6</button><button data-code="Digit7">7</button><button data-code="Digit8">8</button><button data-code="Digit9">9</button><button data-code="Minus">−</button><button data-code="Equal">＋</button></div>
-          <div class="key-row"><button data-code="KeyR">R</button><button data-code="ShiftLeft" class="shift">SHIFT</button><button data-code="Space" class="space">SPACE</button><button data-code="Enter" class="enter">ENTER</button><span class="key-hint">SHIFT = toggle</span></div>
-          <div class="key-row"><div class="key-arrows"><button data-code="ArrowUp" class="up">↑</button><button data-code="ArrowLeft" class="left">←</button><button data-code="ArrowDown" class="down">↓</button><button data-code="ArrowRight" class="right">→</button></div></div>
-        </div>
-        <div class="key-num" aria-label="テンキー">
-          <button data-code="Numpad7">7</button><button data-code="Numpad8">8</button><button data-code="Numpad9">9</button>
-          <button data-code="Numpad4">4</button><button data-code="Numpad5">5</button><button data-code="Numpad6">6</button>
-          <button data-code="Numpad1">1</button><button data-code="Numpad2">2</button><button data-code="Numpad3">3</button>
-          <button data-code="NumpadSubtract">−</button><button data-code="NumpadAdd">＋</button><span></span>
-        </div>
-      </div>
-    `;
-    host.appendChild(this.keyGuide);
+    const ui = createVjUi(host);
+    this.flashElement = ui.flashElement;
+    this.beatPulse = ui.beatPulse;
+    this.hud = ui.hud;
+    this.bpmGraphPath = ui.bpmGraphPath;
+    this.bpmGraphValue = ui.bpmGraphValue;
+    this.keyGuide = ui.keyGuide;
+    this.actionLog = ui.actionLog;
+    this.panel = ui.panel;
+    this.assignOverlay = ui.assignOverlay;
+    this.assignSources = ui.assignSources;
+    this.assignTargets = ui.assignTargets;
+    this.slotElements = ui.slotElements;
+    this.cueButtons = ui.cueButtons;
     this.setupKeyGuide();
 
-    this.actionLog = document.createElement("div");
-    this.actionLog.className = "action-log";
-    this.actionLog.setAttribute("aria-live", "polite");
-    this.actionLog.setAttribute("aria-label", "操作ログ");
-    host.appendChild(this.actionLog);
-
-    this.panel = document.createElement("aside");
-    this.panel.className = "control-panel";
-    this.panel.innerHTML = `
-      <div class="panel-head">
-        <strong>CHARACTER VJ</strong>
-        <button class="icon-btn" data-action="hide" title="Hide panel">×</button>
-      </div>
-      <div class="transport">
-        <label>BPM <input data-field="bpm" type="number" min="30" max="300" step="1" value="128"></label>
-        <button data-action="tap">TAP</button>
-        <button data-action="sync">SYNC</button>
-      </div>
-      <div class="transport">
-        <button data-action="quantize">Q 1/8 BEAT</button>
-        <label>Offset <input data-field="offset" type="number" min="-300" max="300" step="1" value="0"> ms</label>
-      </div>
-      <div class="transport">
-        <label class="fps-limit"><input data-field="limit-fps" type="checkbox"> 60 FPS LIMIT</label>
-        <label class="fps-limit"><input data-field="skip-assign" type="checkbox"> SKIP D&D ASSIGN</label>
-        <label class="fps-limit"><input data-field="hide-background" type="checkbox"> HIDE BACKGROUND</label>
-      </div>
-      <div class="transport volume-row">
-        <label for="sfx-master-volume">SFX VOL</label>
-        <input id="sfx-master-volume" data-field="master-volume" type="range" min="0" max="400" step="1" value="100">
-        <span class="volume-value" data-field="master-volume-value">100%</span>
-      </div>
-      <div class="slots-title">IMAGES / SFX <span>drop anywhere → fullscreen assign</span></div>
-      <div class="slots"></div>
-      <div class="effects"></div>
-      <div class="panel-actions">
-        <button data-action="record">REC [R]</button>
-        <button data-action="midi">ENABLE MIDI</button>
-        <button data-action="fullscreen">FULLSCREEN</button>
-      </div>
-      <div class="hint">Drop anywhere → fullscreen assign · SKIP D&D ASSIGN = auto-assign · SFX silence is auto-trimmed · 1–8 / Numpad: cue · Hold: auto every beat · Shift+1–9: latch (max 4) · 9: random gravity jump / hold auto · +/-: global scale · Arrows: global anchor · Shift+ +/-/Arrows: per-cue adjust · R: 2-bar record / loop · Enter: clear all · Space: TAP · Shift+Space: SYNC · Esc: menu</div>
-    `;
-    host.appendChild(this.panel);
-
-    this.assignOverlay = document.createElement("section");
-    this.assignOverlay.className = "assign-overlay";
-    this.assignOverlay.hidden = true;
-    this.assignOverlay.setAttribute("aria-label", "D&D割り当て");
-    this.assignOverlay.innerHTML = `
-      <div class="assign-top">
-        <div><strong>D&D ASSIGN</strong><br><span>上の素材を下の1〜8へドラッグ</span></div>
-        <button data-action="cancel-assign">CANCEL</button>
-      </div>
-      <div class="assign-sources"></div>
-      <div class="assign-dest-title">DROP TO 1 / 2 / 3 / 4 / 5 / 6 / 7 / 8</div>
-      <div class="assign-targets"></div>
-    `;
-    host.appendChild(this.assignOverlay);
-    this.assignSources = this.assignOverlay.querySelector(".assign-sources")!;
-    this.assignTargets = this.assignOverlay.querySelector(".assign-targets")!;
     // キャンセル時は未割り当て素材を残さず通常画面へ戻す
-    this.assignOverlay.querySelector("[data-action=cancel-assign]")!.addEventListener("click", () => this.closeAssignOverlay(true));
-    for (let i = 0; i < 8; i += 1) {
-      const target = document.createElement("button");
-      target.className = "assign-target";
-      target.innerHTML = `<b>${i + 1}</b><small>EMPTY</small>`;
+    queryRequired<HTMLElement>(this.assignOverlay, "[data-action=cancel-assign]").addEventListener("click", () => this.closeAssignOverlay(true));
+    [...this.assignTargets.children].forEach((targetElement, index) => {
+      const target = targetElement as HTMLElement;
       target.addEventListener("dragover", (event) => { event.preventDefault(); target.classList.add("drag"); });
       target.addEventListener("dragleave", () => target.classList.remove("drag"));
       // 割り当て画面の素材IDを受け取り元のFileを対象スロットへ渡す
@@ -1477,18 +1156,12 @@ export class VJApp implements EffectHost {
         document.body.classList.remove("is-dragging");
         target.classList.remove("drag");
         const id = event.dataTransfer?.getData("text/pending-id");
-        if (id) void this.assignPendingToSlot(id, i);
+        if (id) void this.assignPendingToSlot(id, index);
       });
-      this.assignTargets.appendChild(target);
-    }
+    });
 
-    const slots = this.panel.querySelector(".slots")!;
-    for (let i = 0; i < 8; i += 1) {
-      const slot = document.createElement("button");
-      slot.className = "slot";
-      slot.dataset.index = String(i);
-      slot.innerHTML = `<span>${i + 1}</span><small data-image>IMG DROP</small><em data-audio>SFX —</em>`;
-      slot.addEventListener("click", () => this.selectSlot(i));
+    this.slotElements.forEach((slot, index) => {
+      slot.addEventListener("click", () => this.selectSlot(index));
       slot.addEventListener("dragover", (event) => { event.preventDefault(); slot.classList.add("drag"); });
       slot.addEventListener("dragleave", () => slot.classList.remove("drag"));
       // パネル上への直接ドロップは全画面割り当てを経由せず即時反映する
@@ -1497,24 +1170,15 @@ export class VJApp implements EffectHost {
         event.stopPropagation();
         slot.classList.remove("drag");
         const file = event.dataTransfer?.files[0];
-        if (file) void this.assignFile(i, file);
+        if (file) void this.assignFile(index, file);
       });
-      slots.appendChild(slot);
-      this.slotElements.push(slot);
-    }
+    });
 
-    const effects = this.panel.querySelector(".effects")!;
-    // 物理キーがなくても全キューをクリック発火できるボタンを作る
-    EFFECTS.forEach((effect, index) => {
-      const key = String(index + 1);
-      const button = document.createElement("button");
-      button.innerHTML = `<b>${key}</b><span>${EFFECT_LABELS[effect]}</span>`;
+    this.cueButtons.forEach((button, index) => {
       button.addEventListener("click", (event) => {
         if (event.shiftKey) this.toggleLatch(index, 1);
         else this.triggerCue(index, 1);
       });
-      effects.appendChild(button);
-      this.cueButtons.push(button);
     });
 
     const bpm = this.panel.querySelector<HTMLInputElement>("[data-field=bpm]")!;
@@ -1553,17 +1217,11 @@ export class VJApp implements EffectHost {
     const masterVolume = this.panel.querySelector<HTMLInputElement>("[data-field=master-volume]")!;
     const masterVolumeValue = this.panel.querySelector<HTMLElement>("[data-field=master-volume-value]")!;
     masterVolume.addEventListener("input", () => {
-      this.masterVolume = Math.max(0, Math.min(4, Number(masterVolume.value) / 100));
-      masterVolumeValue.textContent = `${Math.round(this.masterVolume * 100)}%`;
-      if (this.audioMasterGain && this.audioContext) {
-        const now = this.audioContext.currentTime;
-        this.audioMasterGain.gain.cancelScheduledValues(now);
-        // 再生中の音量変更で不連続なクリックノイズが出ないよう短く平滑化する
-        this.audioMasterGain.gain.setTargetAtTime(this.masterVolume, now, 0.008);
-      }
+      this.audio.setVolume(Number(masterVolume.value) / 100);
+      masterVolumeValue.textContent = `${Math.round(this.audio.volume * 100)}%`;
     });
     masterVolume.addEventListener("change", () => {
-      this.logAction(`SFX VOLUME ${Math.round(this.masterVolume * 100)}%`);
+      this.logAction(`SFX VOLUME ${Math.round(this.audio.volume * 100)}%`);
     });
 
     this.panel.querySelector("[data-action=tap]")!.addEventListener("click", () => {
@@ -1703,7 +1361,7 @@ export class VJApp implements EffectHost {
       const kind = file.type.startsWith("audio/") ? "SFX" as const : "IMG" as const;
       let preview = "";
       if (kind === "IMG") {
-        try { preview = await makePanelPreview(file, 420); } catch { preview = ""; }
+        try { preview = await createPanelPreview(file, 420); } catch { preview = ""; }
       }
       this.pendingAssignments.push({ id: this.nextPendingAssignmentId++, file, kind, preview });
     }
@@ -1832,67 +1490,30 @@ export class VJApp implements EffectHost {
     }
     if (!file.type.startsWith("image/")) return;
     const previous = this.slots[index];
+    const loaded = await loadImageFile(file);
+    // 初回キューでGPU転送が発生して引っかからないよう先にアップロードする
+    try {
+      await this.app.renderer.prepare.upload(loaded.texture);
+    } catch (error) {
+      // GPU転送失敗時は新規リソースだけを解放して現在のスロットを維持する
+      URL.revokeObjectURL(loaded.objectUrl);
+      try { loaded.gifDecoder?.close?.(); } catch { /* デコーダーが既に閉じていれば何もしない */ }
+      throw error;
+    }
+    // 新しい画像の準備完了後に古いリソースを解放して失敗時の表示を維持する
     if (previous.objectUrl) URL.revokeObjectURL(previous.objectUrl);
     try { previous.gifDecoder?.close?.(); } catch { /* デコーダーが既に閉じていれば何もしない */ }
 
-    const objectUrl = URL.createObjectURL(file);
-    const panelPreview = await makePanelPreview(file);
-    const isGif = file.type === "image/gif" || /\.gif$/i.test(file.name);
-
-    let texture: Texture;
-    let gifDecoder: GifDecoderLike | undefined;
-    let gifCanvas: HTMLCanvasElement | undefined;
-    let gifFrameIndex = 0;
-    let gifFrameCount = 1;
-    let gifNextAt = 0;
-
-    if (isGif) {
-      const Decoder = (globalThis as unknown as { ImageDecoder?: GifDecoderConstructor }).ImageDecoder;
-      if (!Decoder) throw new Error("ImageDecoder is unavailable in this browser");
-      const supported = Decoder.isTypeSupported ? await Decoder.isTypeSupported("image/gif") : true;
-      if (!supported) throw new Error("ImageDecoder does not support image/gif");
-
-      gifDecoder = new Decoder({
-        data: new Uint8Array(await file.arrayBuffer()),
-        type: "image/gif",
-        preferAnimation: true,
-      });
-      await gifDecoder.tracks.ready;
-      gifFrameCount = Math.max(1, Number(gifDecoder.tracks.selectedTrack?.frameCount) || 1);
-      const first = await gifDecoder.decode({ frameIndex: 0, completeFramesOnly: true });
-      const frame = first.image;
-      const sourceWidth = frame.displayWidth ?? frame.codedWidth ?? 1;
-      const sourceHeight = frame.displayHeight ?? frame.codedHeight ?? 1;
-      // GIFは毎フレームCanvasへ転送するため長辺を1920pxまでに抑える
-      const maxLiveSize = 1920;
-      const ratio = Math.min(1, maxLiveSize / Math.max(sourceWidth, sourceHeight));
-      gifCanvas = document.createElement("canvas");
-      gifCanvas.width = Math.max(1, Math.round(sourceWidth * ratio));
-      gifCanvas.height = Math.max(1, Math.round(sourceHeight * ratio));
-      const ctx = gifCanvas.getContext("2d", { alpha: true });
-      if (!ctx) throw new Error("GIF canvas unavailable");
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = "high";
-      ctx.drawImage(frame as unknown as CanvasImageSource, 0, 0, gifCanvas.width, gifCanvas.height);
-      gifNextAt = performance.now() + this.gifFrameDurationMs(frame);
-      frame.close?.();
-      texture = Texture.from(gifCanvas);
-    } else {
-      texture = await Assets.load<Texture>(objectUrl);
-    }
-
-    // 初回キューでGPU転送が発生して引っかからないよう先にアップロードする
-    await this.app.renderer.prepare.upload(texture);
     this.slots[index] = {
-      texture,
+      texture: loaded.texture,
       name: file.name,
-      objectUrl,
-      isGif,
-      gifDecoder,
-      gifCanvas,
-      gifFrameIndex,
-      gifFrameCount,
-      gifNextAt,
+      objectUrl: loaded.objectUrl,
+      isGif: loaded.isGif,
+      gifDecoder: loaded.gifDecoder,
+      gifCanvas: loaded.gifCanvas,
+      gifFrameIndex: 0,
+      gifFrameCount: loaded.gifFrameCount,
+      gifNextAt: loaded.gifNextAt,
       gifDecoding: false,
       gifActiveUntil: 0,
       // 画像差し替え時も同じスロットの音声と表示補正は維持する
@@ -1907,27 +1528,27 @@ export class VJApp implements EffectHost {
     this.refreshFitScales();
     const el = this.slotElements[index];
     el.classList.add("loaded");
-    el.style.backgroundImage = `url(${panelPreview})`;
-    el.querySelector<HTMLElement>("[data-image]")!.textContent = `${isGif ? "GIF" : "IMG"} ${file.name.replace(/\.[^.]+$/, "").slice(0, 10)}`;
+    el.style.backgroundImage = `url(${loaded.preview})`;
+    el.querySelector<HTMLElement>("[data-image]")!.textContent = `${loaded.isGif ? "GIF" : "IMG"} ${file.name.replace(/\.[^.]+$/, "").slice(0, 10)}`;
     if (this.activeSlot === index) {
       if (this.activeActor && !this.activeActor.destroyed) {
-        this.activeActor.texture = texture;
+        this.activeActor.texture = loaded.texture;
         this.activeActor.visible = false;
       }
       if (this.ambientActor && !this.ambientActor.destroyed) {
-        this.ambientActor.texture = texture;
+        this.ambientActor.texture = loaded.texture;
         this.ambientActor.visible = false;
       }
       this.activeSlot = null;
       this.characterPresenceUntil = 0;
     }
     const latched = this.latchedActors.get(index);
-    if (latched && !latched.destroyed) latched.texture = texture;
+    if (latched && !latched.destroyed) latched.texture = loaded.texture;
     this.persistentBackgroundCharacters.forEach((entry) => {
-      if (entry.slot === index && !entry.sprite.destroyed) entry.sprite.texture = texture;
+      if (entry.slot === index && !entry.sprite.destroyed) entry.sprite.texture = loaded.texture;
     });
     this.updateAssignTargets();
-    this.logAction(`LOAD ${index + 1} ${file.name}${isGif ? ` / GIF DECODER ${gifFrameCount}F` : ""}`);
+    this.logAction(`LOAD ${index + 1} ${file.name}${loaded.isGif ? ` / GIF DECODER ${loaded.gifFrameCount}F` : ""}`);
   }
 
   /** 操作対象のスロットを選択してパネル表示を更新する */
@@ -1964,15 +1585,6 @@ export class VJApp implements EffectHost {
     this.activeActor.scale.set(placement.scale);
   }
 
-  /** WebCodecsのマイクロ秒単位フレーム時間を安全なミリ秒へ変換する */
-  private gifFrameDurationMs(frame: GifFrameLike): number {
-    const durationUs = Number(frame.duration);
-    return Number.isFinite(durationUs) && durationUs > 0
-      // 異常なメタデータで更新が暴走または長時間停止しない範囲へ収める
-      ? Math.max(16, Math.min(10_000, durationUs / 1000))
-      : 100;
-  }
-
   /** 表示中またはラッチ中のGIFだけ次フレームへ進める */
   private updateAnimatedGifs(now: number): void {
     this.slots.forEach((slot, index) => {
@@ -1993,7 +1605,7 @@ export class VJApp implements EffectHost {
           source.update?.();
         }
         slot.gifFrameIndex = nextFrame;
-        slot.gifNextAt = performance.now() + this.gifFrameDurationMs(image);
+        slot.gifNextAt = performance.now() + getGifFrameDurationMs(image);
         image.close?.();
       }).catch((error) => {
         console.warn("GIF frame decode failed", error);
@@ -2020,7 +1632,7 @@ export class VJApp implements EffectHost {
     this.lastHudUpdate = now;
     const position = this.clock.barBeat(now);
     const live = this.activeSlot === null ? "—" : String(this.activeSlot + 1);
-    const mode = this.recording ? "REC 2 BARS" : this.loopActive ? "LOOP 2 BARS" : "LIVE";
+    const mode = this.recorder.isRecording ? "REC 2 BARS" : this.recorder.isLooping ? "LOOP 2 BARS" : "LIVE";
     const auto = [...this.latchedCues.keys()].map((cue) => cue + 1).join(",") || "—";
     const target = this.transformFor(this.activeSlot ?? this.selectedSlot);
     const html = `<b>${this.clock.bpm.toFixed(2)} BPM</b><span>BAR ${position.bar} · BEAT ${position.beat}</span><span>Q ${this.quantize.toUpperCase()}</span><span>CUE ${live}</span><span>AUTO ${auto}</span><span>${mode}</span><span>SIZE ${Math.round(target.scale * 100)}%</span><span>POS ${Math.round(target.anchorX * 100)},${Math.round(target.anchorY * 100)}</span>`;
