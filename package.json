@@ -6,13 +6,15 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "test": "node --experimental-strip-types --test tests/BeatClock.test.ts tests/CueRecorder.test.ts",
+    "test": "node --experimental-strip-types --test tests/BeatClock.test.ts tests/CueRecorder.test.ts tests/latchedMotion.test.ts",
+    "typecheck:test": "tsc -p tests/tsconfig.json",
     "preview": "vite preview"
   },
   "dependencies": {
     "pixi.js": "8.19.0"
   },
   "devDependencies": {
+    "@types/node": "^26.1.2",
     "typescript": "~6.0.2",
     "vite": "^8.2.0"
   }

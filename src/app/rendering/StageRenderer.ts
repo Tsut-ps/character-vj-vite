@@ -1,6 +1,7 @@
 import { Container, Graphics, Sprite } from "pixi.js";
 import type { BeatClock } from "../BeatClock";
 import type { SlotStore } from "../media/SlotStore";
+import { calculateLatchedMotion } from "./latchedMotion";
 
 interface BackgroundCharacter {
   sprite: Sprite;
@@ -260,62 +261,22 @@ export class StageRenderer {
       const fit = this.slots.fitScaleFor(cue);
       const transform = this.slots.transformFor(cue);
       const base = fit * transform.scale;
-      // ラッチ数で画面を等分し各キューの基準位置を独立させる
-      const columnWidth = this.width / count;
-      let x = this.width * ((column + 0.5) / count) + this.width * (transform.anchorX - 0.5);
-      let y = this.height * transform.anchorY;
-      let sx = base;
-      let sy = base;
-      let rotation = 0;
-      const direction = (cue + wholeBeat) % 2 ? -1 : 1;
-
-      if (cue === 0) {
-        const t = Math.min(1, phase * 2.15);
-        const c1 = 1.70158;
-        const c3 = c1 + 1;
-        const back = 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
-        sx *= 0.72 + 0.28 * back;
-        sy *= 0.82 + 0.18 * back;
-        y += this.height * 0.055 * (1 - (t === 1 ? 1 : 1 - Math.pow(2, -10 * t)));
-      } else if (cue === 1) {
-        const t = Math.min(1, phase * 3);
-        const expo = t === 1 ? 1 : 1 - Math.pow(2, -10 * t);
-        x += direction * (1 - expo) * columnWidth * 0.34;
-        rotation = direction * (1 - phase) * 0.08;
-      } else if (cue === 2) {
-        x += Math.sin(phase * Math.PI * 4) * 12;
-        y += Math.sin(phase * Math.PI * 2) * 18;
-        sprite.alpha = 0.84 + Math.sin(phase * Math.PI * 2) * 0.1;
-      } else if (cue === 3) {
-        const hit = Math.exp(-phase * 8) * Math.sin(phase * Math.PI * 2);
-        sx *= 1 + 0.24 * hit;
-        sy *= 1 + 0.18 * hit;
-      } else if (cue === 4) {
-        const step = Math.floor(phase * 8);
-        sx *= step % 2 ? -1 : 1;
-        sy *= step % 4 < 2 ? 1 : -1;
-        y += Math.cos(step * 1.7) * this.height * 0.018;
-      } else if (cue === 5) {
-        const hop = Math.sin(phase * Math.PI);
-        y -= Math.max(0, hop) * this.height * 0.14;
-        sx *= 1 + 0.06 * hop;
-        sy *= 1 - 0.06 * hop;
-      } else if (cue === 6) {
-        sx *= 0.82 + 0.12 * Math.sin(phase * Math.PI * 6);
-        sy *= 0.82 + 0.12 * Math.cos(phase * Math.PI * 6);
-        x += Math.sin(phase * Math.PI * 8 + cue) * columnWidth * 0.08;
-      } else if (cue === 7) {
-        const step = Math.floor(phase * 8);
-        sx *= step % 2 ? -1 : 1;
-        y -= Math.abs(Math.sin(phase * Math.PI * 2)) * this.height * 0.08;
-        x += Math.sin(phase * Math.PI * 6 + cue) * columnWidth * 0.08;
-        rotation = Math.sin(phase * Math.PI * 4) * 0.12;
-      }
-
-      sprite.position.set(x, y);
-      sprite.scale.set(sx, sy);
-      sprite.rotation = rotation;
-      if (cue !== 2) sprite.alpha = 0.96;
+      const motion = calculateLatchedMotion({
+        cue,
+        phase,
+        wholeBeat,
+        baseScale: base,
+        width: this.width,
+        height: this.height,
+        column,
+        count,
+        anchorX: transform.anchorX,
+        anchorY: transform.anchorY,
+      });
+      sprite.position.set(motion.x, motion.y);
+      sprite.scale.set(motion.scaleX, motion.scaleY);
+      sprite.rotation = motion.rotation;
+      sprite.alpha = motion.alpha;
       sprite.visible = true;
     });
   }
