@@ -21,31 +21,14 @@ export class PanelBindings {
   private setup(): void {
     const { panel, slotElements, cueButtons } = this.ui.elements;
     slotElements.forEach((slot, index) => {
-      slot.addEventListener("click", () => this.actions.selectSlot(index), { signal: this.signal });
+      slot.addEventListener("click", (event) => {
+        this.actions.selectSlot(index, false);
+        this.firePanelCue(index, event.shiftKey, "slot");
+      }, { signal: this.signal });
     });
     cueButtons.forEach((button, index) => {
       button.addEventListener("click", (event) => {
-        const sourceId = `ui:panel:cue:${index}`;
-        this.actions.handleAction({
-          type: "cue",
-          cue: index,
-          phase: "down",
-          source: "ui",
-          sourceId,
-          strength: 1,
-          latchToggle: event.shiftKey,
-        });
-        // 通常クリックは保持入力ではないので即時にupも送る。ラッチ切替時は保持状態を作らない。
-        if (!event.shiftKey) {
-          this.actions.handleAction({
-            type: "cue",
-            cue: index,
-            phase: "up",
-            source: "ui",
-            sourceId,
-            strength: 1,
-          });
-        }
+        this.firePanelCue(index, event.shiftKey, "cue");
       }, { signal: this.signal });
     });
 
@@ -102,6 +85,32 @@ export class PanelBindings {
     panel.querySelector("[data-action=midi]")!.addEventListener("click", (event) => {
       void this.enableMidi(event.currentTarget as HTMLButtonElement);
     }, { signal: this.signal });
+  }
+
+
+  /** パネル上の1〜8操作を実キーと同じCue経路へ送る */
+  private firePanelCue(index: number, latchToggle: boolean, control: "slot" | "cue"): void {
+    const sourceId = `ui:panel:${control}:${index}`;
+    this.actions.handleAction({
+      type: "cue",
+      cue: index,
+      phase: "down",
+      source: "ui",
+      sourceId,
+      strength: 1,
+      latchToggle,
+    });
+    // クリック/タップには保持状態がないため、通常Cueは即時にupも送る。
+    if (!latchToggle) {
+      this.actions.handleAction({
+        type: "cue",
+        cue: index,
+        phase: "up",
+        source: "ui",
+        sourceId,
+        strength: 1,
+      });
+    }
   }
 
   /** MIDI入力を有効化して結果をボタンへ表示する */
