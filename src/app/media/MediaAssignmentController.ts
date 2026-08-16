@@ -145,10 +145,13 @@ export class MediaAssignmentController {
     this.view.renderOverlay(this.pendingAssignments, this.panelWasHiddenBeforeAssign);
     this.options.log(`D&D ASSIGN ${valid.length} FILE${valid.length === 1 ? "" : "S"}`);
 
-    await Promise.all(this.pendingAssignments.map(async (item) => {
-      if (item.kind !== "IMG") return;
-      try { item.preview = await createPanelPreview(item.file, 420); } catch { item.preview = ""; }
-    }));
+    const previewJobs = this.pendingAssignments
+      .filter((item) => item.kind === "IMG")
+      .map((item) => async () => {
+        try { item.preview = await createPanelPreview(item.file, 420); } catch { item.preview = ""; }
+      });
+    // 大きい画像を多数落としてもcreateImageBitmapを一斉実行せずピークメモリを抑える
+    await this.runWithConcurrency(previewJobs, 2);
     // 閉じた後や新しいドロップ後に古いプレビュー処理で画面を再表示しない
     if (this.destroyed || revision !== this.pendingRevision) return;
     this.view.renderOverlay(this.pendingAssignments, this.panelWasHiddenBeforeAssign);
@@ -184,16 +187,32 @@ export class MediaAssignmentController {
     const images = files.filter((file) => detectMediaFileKind(file) === "image").slice(0, 8);
     const audio = files.filter((file) => detectMediaFileKind(file) === "audio").slice(0, 8);
     const selected = this.options.getSelectedSlot();
-    const jobs: Promise<void>[] = [];
+    const jobs: Array<() => Promise<void>> = [];
     // 単一素材は選択先へ、複数素材は演奏順が分かりやすい1番から割り当てる
-    if (images.length === 1) jobs.push(this.assignFile(selected, images[0]));
-    else images.forEach((file, index) => jobs.push(this.assignFile(index, file)));
-    if (audio.length === 1) jobs.push(this.assignAudio(selected, audio[0]));
-    else audio.forEach((file, index) => jobs.push(this.assignAudio(index, file)));
+    if (images.length === 1) jobs.push(() => this.assignFile(selected, images[0]));
+    else images.forEach((file, index) => jobs.push(() => this.assignFile(index, file)));
+    if (audio.length === 1) jobs.push(() => this.assignAudio(selected, audio[0]));
+    else audio.forEach((file, index) => jobs.push(() => this.assignAudio(index, file)));
     if (!jobs.length) return;
-    await Promise.all(jobs);
+    // 画像展開・GIF decoder・Audio decodeの同時実行数を抑えてD&D時のプチフリーズを防ぐ
+    await this.runWithConcurrency(jobs, 2);
     if (this.destroyed) return;
     this.options.selectSlot(images.length > 1 || audio.length > 1 ? 0 : selected);
+  }
+
+
+  /** 重いデコード処理を指定数までに制限して順次実行する */
+  private async runWithConcurrency(jobs: Array<() => Promise<void>>, limit: number): Promise<void> {
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < jobs.length) {
+        const index = next;
+        next += 1;
+        await jobs[index]();
+      }
+    };
+    const count = Math.min(Math.max(1, Math.floor(limit)), jobs.length);
+    await Promise.all(Array.from({ length: count }, () => worker()));
   }
 
   /** 非同期イベントの失敗を操作ログへ集約して未処理Promiseを防ぐ */

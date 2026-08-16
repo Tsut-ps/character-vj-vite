@@ -49,6 +49,9 @@ export class VJApp {
   private uiController!: VjUiController;
   private mediaAssignments!: MediaAssignmentController;
   private lastHudUpdate = 0;
+  private fpsLimitEnabled = false;
+  private nextLimitedFrameAt = 0;
+  private animationFrameId = 0;
   private lifecycleAbort = new AbortController();
   private initialized = false;
 
@@ -68,6 +71,27 @@ export class VJApp {
     this.updateBpmGraph(now);
     this.updateHud(now);
   };
+
+  /** rAFを唯一の描画クロックとして使い、必要時だけPixi tickerごと60fpsへ制限する */
+  private onAnimationFrame = (now: number): void => {
+    this.animationFrameId = requestAnimationFrame(this.onAnimationFrame);
+    if (this.fpsLimitEnabled && !this.shouldRunLimitedFrame(now)) return;
+    this.app.ticker.update(now);
+  };
+
+  /** 高リフレッシュレートでも平均60fpsを維持し、60Hzの微小な時刻揺れで30fps化させない */
+  private shouldRunLimitedFrame(now: number): boolean {
+    const frameInterval = 1000 / 60;
+    if (this.nextLimitedFrameAt === 0) this.nextLimitedFrameAt = now;
+    // rAFは理想境界より1ms前後早着することがあるため、小さな許容幅を持たせる
+    if (now + 1 < this.nextLimitedFrameAt) return false;
+    this.nextLimitedFrameAt += frameInterval;
+    // タブ復帰などで大幅に遅れた場合だけ追いつこうとせず現在時刻へリセットする
+    if (now - this.nextLimitedFrameAt > frameInterval * 2) {
+      this.nextLimitedFrameAt = now + frameInterval;
+    }
+    return true;
+  }
 
   /** PixiJSとUIと入力監視を初期化する */
   async init(host: HTMLElement): Promise<void> {
@@ -97,9 +121,13 @@ export class VJApp {
     window.addEventListener("resize", () => this.resize(), { signal: this.lifecycleAbort.signal });
     this.router.start();
 
-    // 入力や音声や拍は実時間基準なので通常は描画上限を設けず必要時だけ60 FPSへ制限する
+    // Pixi自身の自動rAFを止め、1本のrAFからupdate+renderをまとめて駆動する
+    // これによりLIMIT時は「更新だけ」ではなく実描画も本当に60fps上限になる
+    this.app.ticker.autoStart = false;
+    this.app.ticker.stop();
     this.app.ticker.maxFPS = 0;
     this.app.ticker.add(this.onTick);
+    this.animationFrameId = requestAnimationFrame(this.onAnimationFrame);
     this.initialized = true;
   }
 
@@ -110,6 +138,8 @@ export class VJApp {
     this.lifecycleAbort.abort();
     this.router.destroy();
     this.mediaAssignments.destroy();
+    cancelAnimationFrame(this.animationFrameId);
+    this.animationFrameId = 0;
     this.app.ticker.remove(this.onTick);
     this.cueEngine.destroy();
     this.foregroundRenderer.destroy();
@@ -293,7 +323,6 @@ export class VJApp {
       log: (message) => this.logAction(message),
     });
     const actions = createVjUiActions({
-      app: this.app,
       clock: this.clock,
       cueEngine: this.cueEngine,
       router: this.router,
@@ -302,6 +331,7 @@ export class VJApp {
       assignments: this.mediaAssignments,
       handleAction: (action) => this.handleAction(action),
       selectSlot: (index, shouldLog) => this.selectSlot(index, shouldLog),
+      setFpsLimit: (enabled) => this.setFpsLimit(enabled),
       log: (message) => this.logAction(message),
     });
     new VjUiBindings(host, this.uiController, actions, this.lifecycleAbort.signal);
@@ -315,9 +345,18 @@ export class VJApp {
     if (shouldLog) this.logAction(`SELECT SLOT ${index + 1}`);
   }
 
-  /** 表示中またはラッチ中のGIFだけ次フレームへ進める */
+  /** 前景・ラッチ・常駐背景コピーで使われているGIFだけ次フレームへ進める */
   private updateAnimatedGifs(now: number): void {
-    this.slotStore.updateAnimatedGifs(now, (index) => this.cueEngine.isLatched(index));
+    this.slotStore.updateAnimatedGifs(
+      now,
+      (index) => this.cueEngine.isLatched(index) || this.stageRenderer.hasBackgroundCharacter(index),
+    );
+  }
+
+  /** 60fps上限をrAFの時刻境界で切り替える */
+  private setFpsLimit(enabled: boolean): void {
+    this.fpsLimitEnabled = enabled;
+    this.nextLimitedFrameAt = 0;
   }
 
   /** ウィンドウサイズ変更後の座標とフィット率を更新する */

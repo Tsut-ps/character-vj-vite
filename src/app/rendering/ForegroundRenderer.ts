@@ -84,6 +84,8 @@ export class ForegroundRenderer implements EffectHost {
   playSecret(slot: number, lane?: LaneLayout): boolean {
     const texture = this.slots.get(slot).texture;
     if (!texture) return false;
+    // 9番連打で同時スプライトが増え続けないよう以前の上限を維持する
+    if (this.secretLayer.children.length >= 12) return false;
     this.activeSlotValue = slot;
     const sprite = this.acquireFxSprite(texture);
     // 9番演出を通常アクターやラッチ列や他の演出より常に前面へ出す
@@ -131,6 +133,11 @@ export class ForegroundRenderer implements EffectHost {
 
   /** 再割り当てされた画像を表示中の前景へ反映して非表示に戻す */
   refreshSlot(index: number): void {
+    // プール内Spriteが差し替え前Textureを参照し続けないよう割り当て時だけ作り直す
+    for (const sprite of this.fxPool) {
+      if (!sprite.destroyed) sprite.destroy();
+    }
+    this.fxPool = [];
     if (this.activeSlotValue !== index) return;
     const texture = this.slots.get(index).texture;
     if (texture && this.actor && !this.actor.destroyed) this.actor.texture = texture;
@@ -198,6 +205,8 @@ export class ForegroundRenderer implements EffectHost {
   /** 残像用に現在キャラクターのスプライトを借りて配置する */
   cloneCharacter(alpha = 1): Sprite | null {
     if (this.activeSlotValue === null) return null;
+    // SPAM/GHOSTの連打でも残像数を予測可能にし、長いフレーム落ちを防ぐ
+    if (this.fxLayer.children.length >= 40) return null;
     const texture = this.slots.get(this.activeSlotValue).texture;
     if (!texture) return null;
     const sprite = this.acquireFxSprite(texture);

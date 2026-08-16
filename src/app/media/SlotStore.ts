@@ -27,6 +27,7 @@ export class SlotStore {
   private commonTransform: SlotTransform = { scale: 1, anchorX: 0.5, anchorY: 0.5 };
   private resolvedTransforms: SlotTransform[];
   private fitScales: number[];
+  private backgroundFitScales: number[];
   private imageAssignmentRevisions: number[];
   private audioAssignmentRevisions: number[];
   private viewportWidth = 1280;
@@ -38,6 +39,7 @@ export class SlotStore {
     this.slots = Array.from({ length: count }, () => createEmptySlot());
     this.resolvedTransforms = Array.from({ length: count }, () => ({ scale: 1, anchorX: 0.5, anchorY: 0.5 }));
     this.fitScales = Array.from({ length: count }, () => 1);
+    this.backgroundFitScales = Array.from({ length: count }, () => 1);
     this.imageAssignmentRevisions = Array.from({ length: count }, () => 0);
     this.audioAssignmentRevisions = Array.from({ length: count }, () => 0);
   }
@@ -73,6 +75,19 @@ export class SlotStore {
     return this.fitScales[index] ?? 1;
   }
 
+  /** 背景の小型コピー用テクスチャを返す。GIFは現在フレームTextureを全コピーで共有する */
+  backgroundTextureFor(index: number): Texture | null {
+    const slot = this.get(index);
+    if (slot.isGif && slot.texture) return slot.texture;
+    return slot.backgroundTexture ?? slot.texture;
+  }
+
+  /** 背景用テクスチャの寸法に合わせた画面フィット率を返す */
+  backgroundFitScaleFor(index: number): number {
+    const slot = this.get(index);
+    return slot.isGif ? (this.fitScales[index] ?? 1) : (this.backgroundFitScales[index] ?? 1);
+  }
+
   /** 画面サイズを更新して全画像のフィット率を再計算する */
   resize(width: number, height: number): void {
     this.viewportWidth = width;
@@ -104,6 +119,9 @@ export class SlotStore {
     try {
       // 初回キューでGPU転送が発生して引っかからないよう先にアップロードする
       await prepareTexture(loaded.texture);
+      if (loaded.backgroundTexture !== loaded.texture) {
+        await prepareTexture(loaded.backgroundTexture);
+      }
     } catch (error) {
       // GPU転送失敗時は新規リソースだけを解放して現在のスロットを維持する
       this.discardLoadedImage(loaded);
@@ -122,6 +140,7 @@ export class SlotStore {
     this.releaseImageResources(previous);
     this.slots[index] = {
       texture: loaded.texture,
+      backgroundTexture: loaded.backgroundTexture,
       name: file.name,
       objectUrl: loaded.objectUrl,
       isGif: loaded.isGif,
@@ -214,13 +233,13 @@ export class SlotStore {
     if (slot.isGif) slot.gifActiveUntil = Math.max(slot.gifActiveUntil, until);
   }
 
-  /** 表示中またはラッチ中のGIFだけ次フレームへ進める */
-  updateAnimatedGifs(now: number, isLatched: (index: number) => boolean): void {
+  /** 前景・ラッチ・背景コピーのいずれかで使用中のGIFだけ次フレームへ進める */
+  updateAnimatedGifs(now: number, keepGifLive: (index: number) => boolean): void {
     this.slots.forEach((slot, index) => {
       if (!slot.isGif || !slot.gifCanvas || !slot.texture) return;
       if (!slot.gifDecoder && !slot.gifImage) return;
-      const live = now <= slot.gifActiveUntil || isLatched(index);
-      // 非表示GIFを止めて負荷を抑え同じデコーダーの並列decodeも防ぐ
+      const live = now <= slot.gifActiveUntil || keepGifLive(index);
+      // 完全に未使用のGIFだけ止め、同じデコーダーの並列decodeも防ぐ
       if (!live || slot.gifDecoding || now < slot.gifNextAt) return;
 
       if (slot.gifImage) {
@@ -239,22 +258,30 @@ export class SlotStore {
       slot.gifDecoding = true;
       const nextFrame = (slot.gifFrameIndex + 1) % Math.max(1, slot.gifFrameCount);
       void slot.gifDecoder.decode({ frameIndex: nextFrame, completeFramesOnly: true }).then(({ image }) => {
-        const context = slot.gifCanvas!.getContext("2d", { alpha: true });
-        if (context) {
-          context.clearRect(0, 0, slot.gifCanvas!.width, slot.gifCanvas!.height);
-          context.drawImage(image as unknown as CanvasImageSource, 0, 0, slot.gifCanvas!.width, slot.gifCanvas!.height);
-          // Canvasの内容変更をPixiJS側のGPUテクスチャへ通知する
-          const source = slot.texture!.source as unknown as { update?: () => void };
-          source.update?.();
+        try {
+          // decode待ちの間に同じスロットが差し替わった場合、破棄済みTextureへ書き込まない
+          if (this.slots[index] !== slot || !slot.gifCanvas || !slot.texture) return;
+          const context = slot.gifCanvas.getContext("2d", { alpha: true });
+          if (context) {
+            context.clearRect(0, 0, slot.gifCanvas.width, slot.gifCanvas.height);
+            context.drawImage(image as unknown as CanvasImageSource, 0, 0, slot.gifCanvas.width, slot.gifCanvas.height);
+            // Canvasの内容変更をPixiJS側のGPUテクスチャへ通知する
+            const source = slot.texture.source as unknown as { update?: () => void };
+            source.update?.();
+          }
+          slot.gifFrameIndex = nextFrame;
+          slot.gifNextAt = performance.now() + getGifFrameDurationMs(image);
+        } finally {
+          // drawImageやGPU更新が失敗してもVideoFrame相当のリソースを必ず解放する
+          image.close?.();
         }
-        slot.gifFrameIndex = nextFrame;
-        slot.gifNextAt = performance.now() + getGifFrameDurationMs(image);
-        image.close?.();
       }).catch((error) => {
+        // 差し替えやdestroyに伴う旧decoderの失敗は通常系なので警告を出さない
+        if (this.slots[index] !== slot) return;
         console.warn("GIF frame decode failed", error);
         slot.gifNextAt = performance.now() + 100;
       }).finally(() => {
-        slot.gifDecoding = false;
+        if (this.slots[index] === slot) slot.gifDecoding = false;
       });
     });
   }
@@ -300,6 +327,10 @@ export class SlotStore {
     this.audioAssignmentRevisions = this.audioAssignmentRevisions.map((revision) => revision + 1);
     this.audio.destroy();
     for (const slot of this.slots) this.releaseImageResources(slot);
+    // VJAppがHMR等で参照されたままでもAudioBufferやCanvasを保持し続けない
+    this.slots = this.slots.map(() => createEmptySlot());
+    this.fitScales.fill(1);
+    this.backgroundFitScales.fill(1);
   }
 
   /** 共通値とスロット別補正から各表示変形を再計算する */
@@ -325,6 +356,13 @@ export class SlotStore {
           this.viewportHeight / Math.max(1, texture.height),
         ) * 0.94
         : 1;
+      const backgroundTexture = this.backgroundTextureFor(index);
+      this.backgroundFitScales[index] = backgroundTexture
+        ? Math.min(
+          this.viewportWidth / Math.max(1, backgroundTexture.width),
+          this.viewportHeight / Math.max(1, backgroundTexture.height),
+        ) * 0.94
+        : 1;
     }
   }
 
@@ -332,13 +370,43 @@ export class SlotStore {
   private releaseImageResources(slot: Slot): void {
     if (slot.objectUrl) URL.revokeObjectURL(slot.objectUrl);
     try { slot.gifDecoder?.close?.(); } catch { /* デコーダーが既に閉じていれば何もしない */ }
+    if (slot.gifImage) {
+      // native GIFのデコード済みフレームやBlob参照をブラウザが早めに回収できるよう切り離す
+      slot.gifImage.removeAttribute("src");
+    }
+    // 素材差し替えを繰り返してもGPUテクスチャが残り続けないよう明示破棄する
+    const mainTexture = slot.texture;
+    const backgroundTexture = slot.backgroundTexture;
+    if (backgroundTexture && backgroundTexture !== mainTexture) {
+      backgroundTexture.destroy(true);
+    }
+    mainTexture?.destroy(true);
+    // 旧Slotオブジェクトを非同期処理が一時参照していても大きなリソースを保持しない
+    slot.texture = null;
+    slot.backgroundTexture = null;
+    slot.objectUrl = undefined;
+    slot.gifDecoder = undefined;
+    slot.gifImage = undefined;
+    slot.gifCanvas = undefined;
+    slot.isGif = false;
+    slot.gifFrameIndex = 0;
+    slot.gifFrameCount = 1;
+    slot.gifNextAt = 0;
+    slot.gifDecoding = false;
+    slot.gifActiveUntil = 0;
   }
 
   /** 未割り当ての画像リソースをGPUを含めて破棄する */
   private discardLoadedImage(loaded: LoadedImage): void {
+    if (loaded.backgroundTexture !== loaded.texture) {
+      loaded.backgroundTexture.destroy(true);
+    }
     loaded.texture.destroy(true);
-    URL.revokeObjectURL(loaded.objectUrl);
+    if (loaded.objectUrl) URL.revokeObjectURL(loaded.objectUrl);
     try { loaded.gifDecoder?.close?.(); } catch { /* デコーダーが既に閉じていれば何もしない */ }
+    if (loaded.gifImage) {
+      loaded.gifImage.removeAttribute("src");
+    }
   }
 
   /** 書き込み先が存在するスロット番号か検証する */

@@ -25,6 +25,7 @@ export class StageRenderer {
   private backgroundShapes: Graphics[] = [];
   private backgroundCharacters: BackgroundCharacter[] = [];
   private backgroundCharacterPool: Sprite[] = [];
+  private nextBackdropUpdateAt = 0;
   private readonly slots: SlotStore;
   private readonly clock: BeatClock;
 
@@ -63,7 +64,7 @@ export class StageRenderer {
 
   /** 指定キャラクターの小さな背景コピーを2体追加する */
   seedBackgroundCharacters(index: number): void {
-    const texture = this.slots.get(index).texture;
+    const texture = this.slots.backgroundTextureFor(index);
     if (!texture) return;
     for (let i = 0; i < 2; i += 1) {
       // 長時間の連打でも個数が増えないよう古い要素を循環利用する
@@ -90,6 +91,11 @@ export class StageRenderer {
     }
   }
 
+  /** 指定スロットの常駐背景コピーが現在存在するか返す */
+  hasBackgroundCharacter(index: number): boolean {
+    return this.backgroundCharacters.some((entry) => entry.slot === index && !entry.sprite.destroyed);
+  }
+
   /** ラッチ表示スプライトの有無をキュー状態へ合わせる */
   setLatchVisual(cue: number, active: boolean): void {
     const current = this.latchedActors.get(cue);
@@ -110,13 +116,29 @@ export class StageRenderer {
 
   /** 背景と常駐キャラクターとラッチ列を現在時刻まで進める */
   update(now: number, activeSlot: number | null, presenceUntil: number, latchedCues: number[]): void {
-    this.updateBackground(now);
-    this.updateAmbient(now, activeSlot, presenceUntil);
+    // 背景は最大60Hz。ただし単純な「経過>=16.67ms」判定は外側60fps制限と
+    // 二重になった際に1フレームおきに落ちて30fps化するため、絶対時刻境界で進める。
+    const backdropInterval = 1000 / 60;
+    if (this.nextBackdropUpdateAt === 0) this.nextBackdropUpdateAt = now;
+    if (now + 1 >= this.nextBackdropUpdateAt) {
+      this.nextBackdropUpdateAt += backdropInterval;
+      if (now - this.nextBackdropUpdateAt > backdropInterval * 2) {
+        this.nextBackdropUpdateAt = now + backdropInterval;
+      }
+      this.updateBackground(now);
+      this.updateAmbient(now, activeSlot, presenceUntil);
+    }
+    // ラッチ中キャラは前景に近いためディスプレイ更新頻度のまま滑らかに動かす
     this.updateLatchedActors(now, latchedCues);
   }
 
   /** 画像再割り当てを関連する全スプライトへ反映する */
   refreshSlot(index: number, activeSlot: number | null): void {
+    // 待機中の背景Spriteが差し替え前Textureを参照し続けないよう割り当て時だけ破棄する
+    for (const sprite of this.backgroundCharacterPool) {
+      if (!sprite.destroyed) sprite.destroy();
+    }
+    this.backgroundCharacterPool = [];
     const texture = this.slots.get(index).texture;
     if (!texture) return;
     if (activeSlot === index && this.ambientActor && !this.ambientActor.destroyed) {
@@ -125,8 +147,9 @@ export class StageRenderer {
     }
     const latched = this.latchedActors.get(index);
     if (latched && !latched.destroyed) latched.texture = texture;
+    const backgroundTexture = this.slots.backgroundTextureFor(index);
     this.backgroundCharacters.forEach((entry) => {
-      if (entry.slot === index && !entry.sprite.destroyed) entry.sprite.texture = texture;
+      if (entry.slot === index && backgroundTexture && !entry.sprite.destroyed) entry.sprite.texture = backgroundTexture;
     });
   }
 
@@ -206,10 +229,10 @@ export class StageRenderer {
     const phase = this.clock.phase(now);
     const pulse = 0.5 + 0.5 * Math.cos(phase * Math.PI * 2);
     this.backgroundCharacters.forEach((entry, index) => {
-      const slot = this.slots.get(entry.slot);
-      if (!slot.texture || entry.sprite.destroyed) return;
-      if (entry.sprite.texture !== slot.texture) entry.sprite.texture = slot.texture;
-      const fit = this.slots.fitScaleFor(entry.slot) * this.slots.transformFor(entry.slot).scale;
+      const texture = this.slots.backgroundTextureFor(entry.slot);
+      if (!texture || entry.sprite.destroyed) return;
+      if (entry.sprite.texture !== texture) entry.sprite.texture = texture;
+      const fit = this.slots.backgroundFitScaleFor(entry.slot) * this.slots.transformFor(entry.slot).scale;
       const scale = fit * entry.size * (1 + pulse * 0.12);
       entry.sprite.position.set(
         this.width * (0.5 + 0.46 * Math.sin(beat * (0.11 + (index % 7) * 0.009) + entry.seed)),

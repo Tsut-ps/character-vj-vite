@@ -25,7 +25,8 @@ type GifDecoderConstructor = {
 
 export interface LoadedImage {
   texture: Texture;
-  objectUrl: string;
+  backgroundTexture: Texture;
+  objectUrl?: string;
   preview: string;
   isGif: boolean;
   gifDecoder?: GifDecoderLike;
@@ -35,13 +36,18 @@ export interface LoadedImage {
   gifNextAt: number;
 }
 
+/** Canvasをパネル表示用の軽量WebPへ変換する */
+function canvasToPreview(canvas: HTMLCanvasElement): string {
+  return canvas.toDataURL("image/webp", 0.72);
+}
+
 /** パネル表示用に画像を縮小して軽量なWebPへ変換する */
 export async function createPanelPreview(file: File, maxSize = 384): Promise<string> {
   const bitmap = await createImageBitmap(file);
   try {
     const { canvas, context } = createScaledCanvas(bitmap.width, bitmap.height, maxSize);
     context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL("image/webp", 0.72);
+    return canvasToPreview(canvas);
   } finally {
     // Canvas変換で例外が出てもデコード済みBitmapを残さない
     bitmap.close();
@@ -91,14 +97,21 @@ async function decodeImageElement(objectUrl: string): Promise<HTMLImageElement> 
 }
 
 /** WebCodecs非対応時にブラウザ標準GIFをCanvasテクスチャとして読み込む */
-async function loadNativeGif(objectUrl: string, preview: string): Promise<LoadedImage> {
+async function loadNativeGif(objectUrl: string): Promise<LoadedImage> {
   const gifImage = await decodeImageElement(objectUrl);
-  const { canvas, context } = createScaledCanvas(gifImage.naturalWidth, gifImage.naturalHeight, 1920);
+  const { canvas, context } = createScaledCanvas(gifImage.naturalWidth, gifImage.naturalHeight, 1280);
   context.drawImage(gifImage, 0, 0, canvas.width, canvas.height);
+  const { canvas: backgroundCanvas, context: backgroundContext } = createScaledCanvas(
+    gifImage.naturalWidth,
+    gifImage.naturalHeight,
+    384,
+  );
+  backgroundContext.drawImage(gifImage, 0, 0, backgroundCanvas.width, backgroundCanvas.height);
   return {
     texture: Texture.from(canvas),
+    backgroundTexture: Texture.from(backgroundCanvas),
     objectUrl,
-    preview,
+    preview: canvasToPreview(backgroundCanvas),
     isGif: true,
     gifImage,
     gifCanvas: canvas,
@@ -114,15 +127,24 @@ export async function loadImageFile(file: File): Promise<LoadedImage> {
   let gifDecoder: GifDecoderLike | undefined;
 
   try {
-    const preview = await createPanelPreview(file);
     const isGif = file.type === "image/gif" || /\.gif$/i.test(file.name);
     if (!isGif) {
       const image = await decodeImageElement(objectUrl);
+      const texture = Texture.from(image);
+      // 小さい背景コピーは元の4K等をサンプリングせず384px静止Textureを共有する
+      const { canvas: backgroundCanvas, context: backgroundContext } = createScaledCanvas(
+        image.naturalWidth,
+        image.naturalHeight,
+        384,
+      );
+      backgroundContext.drawImage(image, 0, 0, backgroundCanvas.width, backgroundCanvas.height);
+      const backgroundTexture = Texture.from(backgroundCanvas);
+      // 読み込み済みHTMLImageElementが画像本体を保持するためBlob URL自体はここで解放できる
+      URL.revokeObjectURL(objectUrl);
       return {
-        // Assetsは拡張子のないBlob URLから形式を判定できないためデコード済み要素を直接渡す
-        texture: Texture.from(image),
-        objectUrl,
-        preview,
+        texture,
+        backgroundTexture,
+        preview: canvasToPreview(backgroundCanvas),
         isGif: false,
         gifFrameCount: 1,
         gifNextAt: 0,
@@ -146,13 +168,30 @@ export async function loadImageFile(file: File): Promise<LoadedImage> {
           try {
             const sourceWidth = frame.displayWidth ?? frame.codedWidth ?? 1;
             const sourceHeight = frame.displayHeight ?? frame.codedHeight ?? 1;
-            // GIFは毎フレームCanvasへ転送するため長辺を1920pxまでに抑える
-            const { canvas: gifCanvas, context } = createScaledCanvas(sourceWidth, sourceHeight, 1920);
+            // GIFはフレームごとにGPU転送するため長辺1280pxへ抑え、静止画より転送量を大幅に減らす
+            const { canvas: gifCanvas, context } = createScaledCanvas(sourceWidth, sourceHeight, 1280);
             context.drawImage(frame as unknown as CanvasImageSource, 0, 0, gifCanvas.width, gifCanvas.height);
+            // GIFのUIプレビュー用に先頭フレームの軽量Textureも保持する
+            const { canvas: backgroundCanvas, context: backgroundContext } = createScaledCanvas(
+              sourceWidth,
+              sourceHeight,
+              384,
+            );
+            backgroundContext.drawImage(
+              frame as unknown as CanvasImageSource,
+              0,
+              0,
+              backgroundCanvas.width,
+              backgroundCanvas.height,
+            );
+            const texture = Texture.from(gifCanvas);
+            const backgroundTexture = Texture.from(backgroundCanvas);
+            // WebCodecsはFileのbyte配列を保持しておりBlob URLは再生に不要なので早めに解放する
+            URL.revokeObjectURL(objectUrl);
             return {
-              texture: Texture.from(gifCanvas),
-              objectUrl,
-              preview,
+              texture,
+              backgroundTexture,
+              preview: canvasToPreview(backgroundCanvas),
               isGif: true,
               gifDecoder,
               gifCanvas,
@@ -169,7 +208,7 @@ export async function loadImageFile(file: File): Promise<LoadedImage> {
         gifDecoder = undefined;
       }
     }
-    return await loadNativeGif(objectUrl, preview);
+    return await loadNativeGif(objectUrl);
   } catch (error) {
     // 読み込み失敗時にBlob URLとデコーダーを残さない
     URL.revokeObjectURL(objectUrl);

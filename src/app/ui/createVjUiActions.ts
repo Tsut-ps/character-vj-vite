@@ -1,4 +1,3 @@
-import type { Application } from "pixi.js";
 import type { BeatClock } from "../BeatClock";
 import type { CueEngine } from "../cues/CueEngine";
 import type { InputRouter } from "../InputRouter";
@@ -9,7 +8,6 @@ import type { AppAction } from "../types";
 import type { VjUiActions } from "./bindings/VjUiActions";
 
 interface VjUiActionDependencies {
-  app: Application;
   clock: BeatClock;
   cueEngine: CueEngine;
   router: InputRouter;
@@ -18,12 +16,13 @@ interface VjUiActionDependencies {
   assignments: MediaAssignmentController;
   handleAction: (action: AppAction) => void;
   selectSlot: (index: number, shouldLog?: boolean) => void;
+  setFpsLimit: (enabled: boolean) => void;
   log: (message: string) => void;
 }
 
 /** アプリの各機能をUI向けの操作インターフェースへ変換する */
 export function createVjUiActions(dependencies: VjUiActionDependencies): VjUiActions {
-  const { app, clock, cueEngine, router, slots, stage, assignments, log } = dependencies;
+  const { clock, cueEngine, router, slots, stage, assignments, log } = dependencies;
   return {
     handleAction: dependencies.handleAction,
     selectSlot: dependencies.selectSlot,
@@ -39,7 +38,7 @@ export function createVjUiActions(dependencies: VjUiActionDependencies): VjUiAct
       return clock.offsetMs;
     },
     setFpsLimit: (enabled) => {
-      app.ticker.maxFPS = enabled ? 60 : 0;
+      dependencies.setFpsLimit(enabled);
       log(enabled ? "60 FPS LIMIT ON" : "60 FPS LIMIT OFF");
     },
     setBackgroundHidden: (hidden) => {

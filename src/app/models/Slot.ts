@@ -3,6 +3,8 @@ import type { GifDecoderLike } from "../services/ImageLoader";
 
 export interface Slot {
   texture: Texture | null;
+  /** 背景の小型コピー用。静止画では軽量テクスチャ、GIFではプレビュー用静止Textureを保持する */
+  backgroundTexture: Texture | null;
   name: string;
   objectUrl?: string;
   isGif: boolean;
@@ -27,6 +29,7 @@ export interface Slot {
 export function createEmptySlot(): Slot {
   return {
     texture: null,
+    backgroundTexture: null,
     name: "empty",
     isGif: false,
     gifFrameIndex: 0,
