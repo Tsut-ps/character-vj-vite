@@ -1,5 +1,9 @@
 # Character VJ
 
+<img width="3000" height="1251" alt="image" src="https://github.com/user-attachments/assets/6781625e-da27-43ef-9baf-45dc339e5c18" />
+
+（立ち絵：ずんずんPJ公式 ずんだもん）
+
 HWサンプラーっていうんですか？ 効果音をポン出しできるやつ、あれみたいな感じで、キャラクター出せたらおもしろいなぁとおもった次第です
 
 画像/GIF（+ 短いSFX）を1〜8へ割り当て、BPM同期で叩けるキャラクターVJ的ななにかです
