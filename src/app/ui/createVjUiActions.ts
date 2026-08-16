@@ -17,8 +17,6 @@ interface VjUiActionDependencies {
   stage: StageRenderer;
   assignments: MediaAssignmentController;
   handleAction: (action: AppAction) => void;
-  adjustScale: (delta: number, individual: boolean) => void;
-  moveAnchor: (dx: number, dy: number, individual: boolean) => void;
   selectSlot: (index: number, shouldLog?: boolean) => void;
   log: (message: string) => void;
 }
@@ -28,26 +26,11 @@ export function createVjUiActions(dependencies: VjUiActionDependencies): VjUiAct
   const { app, clock, cueEngine, router, slots, stage, assignments, log } = dependencies;
   return {
     handleAction: dependencies.handleAction,
-    triggerCue: (cue, latchToggle) => {
-      slots.resumeAudio();
-      cueEngine.trigger(cue, 1, latchToggle);
-    },
-    adjustScale: dependencies.adjustScale,
-    moveAnchor: dependencies.moveAnchor,
     selectSlot: dependencies.selectSlot,
     setBpm: (value) => {
       clock.setBpm(value);
       log(`BPM ${clock.bpm.toFixed(2)}`);
       return clock.bpm;
-    },
-    tap: () => {
-      const bpm = clock.tap();
-      log(`TAP ${bpm.toFixed(2)}`);
-      return bpm;
-    },
-    sync: () => {
-      clock.sync();
-      log("SYNC");
     },
     cycleQuantize: () => cueEngine.cycleQuantize(),
     setOffset: (value) => {
@@ -71,11 +54,7 @@ export function createVjUiActions(dependencies: VjUiActionDependencies): VjUiAct
       slots.setVolume(value);
       return slots.volume;
     },
-    toggleRecord: () => cueEngine.toggleRecord(),
     enableMidi: () => router.enableMidi(),
-    cancelDropOverlay: () => assignments.cancelDropOverlay(),
-    isAssignmentOpen: () => assignments.isOpen,
-    closeAssignment: () => assignments.close(),
     log,
   };
 }

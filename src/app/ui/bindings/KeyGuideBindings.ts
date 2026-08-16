@@ -7,14 +7,12 @@ export class KeyGuideBindings {
   private readonly ui: VjUiController;
   private readonly actions: VjUiActions;
   private readonly signal: AbortSignal;
-  private readonly handleEscape: () => void;
 
   /** キーガイドへ仮想入力処理を設定する */
-  constructor(ui: VjUiController, actions: VjUiActions, signal: AbortSignal, handleEscape: () => void) {
+  constructor(ui: VjUiController, actions: VjUiActions, signal: AbortSignal) {
     this.ui = ui;
     this.actions = actions;
     this.signal = signal;
-    this.handleEscape = handleEscape;
     this.setup();
   }
 
@@ -24,7 +22,7 @@ export class KeyGuideBindings {
     this.ui.setVirtualShift(active);
   }
 
-  /** ガイド上のキー押下を実キーボードと同じ操作へ変換する */
+  /** ガイド上のキー押下を実キーボードと同じAppActionへ変換する */
   private handleKeyDown(code: string, sourceId: string): boolean {
     const cue = /^(?:Digit|Numpad)([1-9])$/.exec(code);
     if (cue) {
@@ -41,35 +39,38 @@ export class KeyGuideBindings {
       return !this.virtualShift;
     }
     if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(code)) {
-      this.actions.moveAnchor(
-        code === "ArrowLeft" ? -0.025 : code === "ArrowRight" ? 0.025 : 0,
-        code === "ArrowUp" ? -0.025 : code === "ArrowDown" ? 0.025 : 0,
-        this.virtualShift,
-      );
+      this.actions.handleAction({
+        type: "move-anchor",
+        source: "ui",
+        dx: code === "ArrowLeft" ? -0.025 : code === "ArrowRight" ? 0.025 : 0,
+        dy: code === "ArrowUp" ? -0.025 : code === "ArrowDown" ? 0.025 : 0,
+        individual: this.virtualShift,
+      });
       return false;
     }
     if (code === "Equal" || code === "NumpadAdd") {
-      this.actions.adjustScale(0.1, this.virtualShift);
+      this.actions.handleAction({ type: "adjust-scale", source: "ui", delta: 0.1, individual: this.virtualShift });
       return false;
     }
     if (code === "Minus" || code === "NumpadSubtract") {
-      this.actions.adjustScale(-0.1, this.virtualShift);
+      this.actions.handleAction({ type: "adjust-scale", source: "ui", delta: -0.1, individual: this.virtualShift });
       return false;
     }
     if (code === "Enter") {
-      this.actions.handleAction({ type: "clear", source: "keyboard" });
+      this.actions.handleAction({ type: "clear", source: "ui" });
       return false;
     }
     if (code === "Escape") {
-      this.handleEscape();
+      this.actions.handleAction({ type: "escape", source: "ui" });
       return false;
     }
     if (code === "Space") {
-      if (this.virtualShift) this.actions.sync();
-      else this.updateBpmInput(this.actions.tap());
+      this.actions.handleAction({ type: this.virtualShift ? "sync" : "tap", source: "ui" });
       return false;
     }
-    if (code === "KeyR") this.actions.toggleRecord();
+    if (code === "KeyR") {
+      this.actions.handleAction({ type: "toggle-record", source: "ui" });
+    }
     return false;
   }
 
@@ -108,11 +109,5 @@ export class KeyGuideBindings {
       button.addEventListener("pointerup", end, { signal: this.signal });
       button.addEventListener("pointercancel", end, { signal: this.signal });
     }
-  }
-
-  /** BPM入力欄を確定した現在値へ更新する */
-  private updateBpmInput(value: number): void {
-    const input = this.ui.elements.panel.querySelector<HTMLInputElement>("[data-field=bpm]");
-    if (input) input.value = value.toFixed(2);
   }
 }

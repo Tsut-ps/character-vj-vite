@@ -42,7 +42,10 @@ export class VJApp {
     onClear: () => this.handleClearAction(),
     log: (message) => this.logAction(message),
   });
-  private router = new InputRouter((action) => this.handleAction(action));
+  private router = new InputRouter(
+    (action) => this.handleAction(action),
+    (code, active) => this.uiController?.setKeyVisual(code, active),
+  );
   private uiController!: VjUiController;
   private mediaAssignments!: MediaAssignmentController;
   private lastHudUpdate = 0;
@@ -136,10 +139,37 @@ export class VJApp {
     this.slotStore.playAudio(index, strength);
   }
 
-  /** 共通入力アクションを解除やラッチやキュー発火へ振り分ける */
+  /** キーボード・MIDI・ゲームパッド・UIの共通アクションを機能へ振り分ける */
   private handleAction(action: AppAction): void {
-    this.slotStore.resumeAudio();
-    this.cueEngine.handleAction(action);
+    switch (action.type) {
+      case "cue":
+      case "clear":
+        this.slotStore.resumeAudio();
+        this.cueEngine.handleAction(action);
+        return;
+      case "adjust-scale":
+        this.adjustActiveScale(action.delta, action.individual);
+        return;
+      case "move-anchor":
+        this.moveActiveAnchor(action.dx, action.dy, action.individual);
+        return;
+      case "tap": {
+        const bpm = this.clock.tap();
+        this.uiController.setBpmInput(bpm);
+        this.logAction(`TAP ${bpm.toFixed(2)}`);
+        return;
+      }
+      case "sync":
+        this.clock.sync();
+        this.logAction("SYNC");
+        return;
+      case "toggle-record":
+        this.cueEngine.toggleRecord();
+        return;
+      case "escape":
+        this.handleEscapeAction();
+        return;
+    }
   }
 
   /** キューの音声と画像演出を実際に再生する */
@@ -181,6 +211,18 @@ export class VJApp {
     this.stageRenderer.seedBackgroundCharacters(cue);
     if (cue === 3) this.foregroundRenderer.shake(10 * strength, 150);
     else if (cue === 7 && wholeBeat % 2 === 0) this.uiController.flash(0.18);
+  }
+
+  /** Escをドロップ案内、割り当て画面、操作パネルの順に適用する */
+  private handleEscapeAction(): void {
+    if (this.mediaAssignments.cancelDropOverlay()) return;
+    if (this.mediaAssignments.isOpen) {
+      this.mediaAssignments.close();
+      return;
+    }
+    const panel = this.uiController.elements.panel;
+    panel.classList.toggle("hidden");
+    this.logAction(panel.classList.contains("hidden") ? "MENU HIDE" : "MENU SHOW");
   }
 
   /** 割り当て画面または全演出を現在の表示状態に応じてクリアする */
@@ -259,8 +301,6 @@ export class VJApp {
       stage: this.stageRenderer,
       assignments: this.mediaAssignments,
       handleAction: (action) => this.handleAction(action),
-      adjustScale: (delta, individual) => this.adjustActiveScale(delta, individual),
-      moveAnchor: (dx, dy, individual) => this.moveActiveAnchor(dx, dy, individual),
       selectSlot: (index, shouldLog) => this.selectSlot(index, shouldLog),
       log: (message) => this.logAction(message),
     });

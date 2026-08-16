@@ -1,16 +1,23 @@
 import type { AppAction } from "./types";
 import { isFormControlTarget } from "./dom";
 
+/** キーボード・ゲームパッド・MIDIを共通AppActionへ変換する */
 export class InputRouter {
-  private onAction: (action: AppAction) => void;
+  private readonly onAction: (action: AppAction) => void;
+  private readonly onKeyVisual: (code: string, active: boolean) => void;
   private keyboardCues = new Map<string, number>();
+  private keyboardVisuals = new Set<string>();
   private gamepadButtons = new Map<number, boolean[]>();
   private midiAccess: MIDIAccess | null = null;
   private midiCues = new Map<string, number>();
 
   /** 入力をアプリ共通のアクションへ渡すルーターを作る */
-  constructor(onAction: (action: AppAction) => void) {
+  constructor(
+    onAction: (action: AppAction) => void,
+    onKeyVisual: (code: string, active: boolean) => void = () => undefined,
+  ) {
     this.onAction = onAction;
+    this.onKeyVisual = onKeyVisual;
   }
 
   /** キーボード入力の監視を開始する */
@@ -65,25 +72,67 @@ export class InputRouter {
     return names;
   }
 
-  /** キー押下をキュー開始または全消去へ変換する */
+  /** 実キーボードのkeydownを共通AppActionへ変換する */
   private onKeyDown = (event: KeyboardEvent): void => {
     // 数値入力や選択操作をVJショートカットとして二重処理しない
     if (isFormControlTarget(event.target)) return;
-    if (event.code === "Enter") {
+    this.setKeyVisual(event.code, true);
+
+    // 矢印とサイズ変更はOSのキーリピートをそのまま連続調整として使う
+    if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.code)) {
       event.preventDefault();
-      if (!event.repeat) this.onAction({ type: "clear", source: "keyboard" });
+      this.onAction({
+        type: "move-anchor",
+        source: "keyboard",
+        dx: event.code === "ArrowLeft" ? -0.025 : event.code === "ArrowRight" ? 0.025 : 0,
+        dy: event.code === "ArrowUp" ? -0.025 : event.code === "ArrowDown" ? 0.025 : 0,
+        individual: event.shiftKey,
+      });
       return;
     }
-    // 長押しの反復発火はアプリ側の拍同期処理へ一本化する
+    if (event.code === "NumpadAdd" || event.key === "+") {
+      event.preventDefault();
+      this.onAction({ type: "adjust-scale", source: "keyboard", delta: 0.1, individual: event.shiftKey });
+      return;
+    }
+    if (event.code === "NumpadSubtract" || event.code === "Minus") {
+      event.preventDefault();
+      this.onAction({ type: "adjust-scale", source: "keyboard", delta: -0.1, individual: event.shiftKey });
+      return;
+    }
+
+    // それ以外は長押しリピートをアプリ側で扱うため最初のkeydownだけ送る
     if (event.repeat) return;
+    if (event.code === "Enter") {
+      event.preventDefault();
+      this.onAction({ type: "clear", source: "keyboard" });
+      return;
+    }
+    if (event.code === "Escape") {
+      event.preventDefault();
+      this.onAction({ type: "escape", source: "keyboard" });
+      return;
+    }
+    if (event.code === "Space") {
+      event.preventDefault();
+      this.onAction({ type: event.shiftKey ? "sync" : "tap", source: "keyboard" });
+      return;
+    }
+    if (event.code === "KeyR") {
+      event.preventDefault();
+      this.onAction({ type: "toggle-record", source: "keyboard" });
+      return;
+    }
+
     const match = /^(?:Digit|Numpad)([1-9])$/.exec(event.code);
     if (!match) return;
     event.preventDefault();
+    const cue = Number(match[1]) - 1;
     const sourceId = `kbd:${event.code}`;
-    this.keyboardCues.set(sourceId, Number(match[1]) - 1);
+    this.keyboardCues.set(sourceId, cue);
     this.onAction({
       type: "cue",
-      cue: Number(match[1]) - 1,
+      cue,
       phase: "down",
       source: "keyboard",
       sourceId,
@@ -92,8 +141,9 @@ export class InputRouter {
     });
   };
 
-  /** キー解放をキュー終了へ変換する */
+  /** 実キーボードのkeyupを表示解除とキュー終了へ変換する */
   private onKeyUp = (event: KeyboardEvent): void => {
+    this.setKeyVisual(event.code, false);
     const match = /^(?:Digit|Numpad)([1-9])$/.exec(event.code);
     if (!match) return;
     event.preventDefault();
@@ -171,12 +221,21 @@ export class InputRouter {
     }
   };
 
-  /** フォーカス喪失時に押下中のキーボードキューをすべて解除する */
+  /** 右下キーガイドの実キー押下表示を更新する */
+  private setKeyVisual(code: string, active: boolean): void {
+    if (active) this.keyboardVisuals.add(code);
+    else this.keyboardVisuals.delete(code);
+    this.onKeyVisual(code, active);
+  }
+
+  /** フォーカス喪失時に押下中のキーボード状態をすべて解除する */
   private releaseKeyboardInputs = (): void => {
     for (const [sourceId, cue] of this.keyboardCues) {
       this.onAction({ type: "cue", cue, phase: "up", source: "keyboard", sourceId, strength: 1 });
     }
     this.keyboardCues.clear();
+    for (const code of this.keyboardVisuals) this.onKeyVisual(code, false);
+    this.keyboardVisuals.clear();
   };
 
   /** 切断された機器または全機器のMIDIキューを解除する */

@@ -112,6 +112,12 @@ export class VjUiController {
     this.elements.cueButtons[cue]?.classList.toggle("latched", active);
   }
 
+  /** TAPなど外部操作で変わったBPMをパネル入力欄へ反映する */
+  setBpmInput(bpm: number): void {
+    const input = this.elements.panel.querySelector<HTMLInputElement>("[data-field=bpm]");
+    if (input) input.value = bpm.toFixed(2);
+  }
+
   /** 録音とループ状態を操作ボタンへ反映する */
   setRecordState(recording: boolean, looping: boolean): void {
     const button = this.elements.panel.querySelector<HTMLButtonElement>("[data-action=record]");

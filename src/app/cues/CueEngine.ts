@@ -1,7 +1,7 @@
 import type { BeatClock } from "../BeatClock";
 import { AnimationScheduler } from "../services/AnimationScheduler";
 import { CueRecorder } from "../services/CueRecorder";
-import { EFFECT_LABELS, EFFECTS, type AppAction, type EffectId, type Quantize } from "../types";
+import { EFFECT_LABELS, EFFECTS, type CueEngineAction, type EffectId, type Quantize } from "../types";
 
 const RECORD_BEATS = 8;
 
@@ -67,7 +67,7 @@ export class CueEngine {
   }
 
   /** 共通入力アクションを解除やラッチやキュー発火へ振り分ける */
-  handleAction(action: AppAction): void {
+  handleAction(action: CueEngineAction): void {
     if (action.type === "clear") {
       this.host.onClear();
       return;
@@ -93,16 +93,6 @@ export class CueEngine {
     });
     if (action.cue === 8) this.triggerSecretCue();
     else this.triggerCue(action.cue, action.strength);
-  }
-
-  /** クリック操作など保持状態を持たない入力を直接発火する */
-  trigger(cue: number, strength = 1, latchToggle = false): void {
-    if (latchToggle) {
-      this.toggleLatch(cue, strength);
-      return;
-    }
-    if (cue === 8) this.triggerSecretCue();
-    else this.triggerCue(cue, strength);
   }
 
   /** 長押しと録音とループを現在時刻まで進める */

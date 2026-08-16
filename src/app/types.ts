@@ -10,22 +10,64 @@ export type EffectId =
 
 export type Quantize = "off" | "1/8" | "1/4" | "1beat" | "1bar";
 
-export interface ClearAction {
-  type: "clear";
-  source: "keyboard";
+export type InputSource = "keyboard" | "gamepad" | "midi" | "ui";
+
+interface BaseInputAction {
+  source: InputSource;
 }
 
-export interface CueAction {
+export interface ClearAction extends BaseInputAction {
+  type: "clear";
+}
+
+export interface CueAction extends BaseInputAction {
   type: "cue";
   cue: number;
   phase: "down" | "up";
-  source: "keyboard" | "gamepad" | "midi" | "ui";
   sourceId: string;
   strength: number;
   latchToggle?: boolean;
 }
 
-export type AppAction = CueAction | ClearAction;
+export interface AdjustScaleAction extends BaseInputAction {
+  type: "adjust-scale";
+  delta: number;
+  individual: boolean;
+}
+
+export interface MoveAnchorAction extends BaseInputAction {
+  type: "move-anchor";
+  dx: number;
+  dy: number;
+  individual: boolean;
+}
+
+export interface TapAction extends BaseInputAction {
+  type: "tap";
+}
+
+export interface SyncAction extends BaseInputAction {
+  type: "sync";
+}
+
+export interface ToggleRecordAction extends BaseInputAction {
+  type: "toggle-record";
+}
+
+export interface EscapeAction extends BaseInputAction {
+  type: "escape";
+}
+
+export type CueEngineAction = CueAction | ClearAction;
+
+export type AppAction =
+  | CueEngineAction
+  | AdjustScaleAction
+  | MoveAnchorAction
+  | TapAction
+  | SyncAction
+  | ToggleRecordAction
+  | EscapeAction;
 
 export const EFFECTS: readonly EffectId[] = [
   "pop",

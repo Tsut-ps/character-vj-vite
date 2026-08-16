@@ -24,7 +24,29 @@ export class PanelBindings {
       slot.addEventListener("click", () => this.actions.selectSlot(index), { signal: this.signal });
     });
     cueButtons.forEach((button, index) => {
-      button.addEventListener("click", (event) => this.actions.triggerCue(index, event.shiftKey), { signal: this.signal });
+      button.addEventListener("click", (event) => {
+        const sourceId = `ui:panel:cue:${index}`;
+        this.actions.handleAction({
+          type: "cue",
+          cue: index,
+          phase: "down",
+          source: "ui",
+          sourceId,
+          strength: 1,
+          latchToggle: event.shiftKey,
+        });
+        // 通常クリックは保持入力ではないので即時にupも送る。ラッチ切替時は保持状態を作らない。
+        if (!event.shiftKey) {
+          this.actions.handleAction({
+            type: "cue",
+            cue: index,
+            phase: "up",
+            source: "ui",
+            sourceId,
+            strength: 1,
+          });
+        }
+      }, { signal: this.signal });
     });
 
     const bpm = panel.querySelector<HTMLInputElement>("[data-field=bpm]")!;
@@ -62,14 +84,18 @@ export class PanelBindings {
     }, { signal: this.signal });
 
     panel.querySelector("[data-action=tap]")!.addEventListener("click", () => {
-      bpm.value = this.actions.tap().toFixed(2);
+      this.actions.handleAction({ type: "tap", source: "ui" });
     }, { signal: this.signal });
-    panel.querySelector("[data-action=sync]")!.addEventListener("click", () => this.actions.sync(), { signal: this.signal });
+    panel.querySelector("[data-action=sync]")!.addEventListener("click", () => {
+      this.actions.handleAction({ type: "sync", source: "ui" });
+    }, { signal: this.signal });
     panel.querySelector("[data-action=hide]")!.addEventListener("click", () => {
       panel.classList.add("hidden");
       this.actions.log("MENU HIDE");
     }, { signal: this.signal });
-    panel.querySelector("[data-action=record]")!.addEventListener("click", () => this.actions.toggleRecord(), { signal: this.signal });
+    panel.querySelector("[data-action=record]")!.addEventListener("click", () => {
+      this.actions.handleAction({ type: "toggle-record", source: "ui" });
+    }, { signal: this.signal });
     panel.querySelector("[data-action=fullscreen]")!.addEventListener("click", () => {
       void this.enterFullscreen();
     }, { signal: this.signal });
