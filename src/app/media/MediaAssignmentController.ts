@@ -88,16 +88,13 @@ export class MediaAssignmentController {
 
   /** 未割り当て素材を破棄して通常画面へ戻す */
   close(): void {
-    this.pendingRevision += 1;
-    this.pendingAssignments = [];
-    this.view.renderOverlay(this.pendingAssignments, this.panelWasHiddenBeforeAssign);
-    this.options.log("D&D ASSIGN CLOSE");
+    this.finishAssignment(true);
   }
 
   /** Enter操作で残り素材を破棄して割り当てを確定する */
   confirm(): void {
     const remaining = this.pendingAssignments.length;
-    this.close();
+    this.finishAssignment(false);
     this.options.log(`D&D ASSIGN CONFIRM${remaining ? ` / SKIP ${remaining}` : ""}`);
   }
 
@@ -112,6 +109,14 @@ export class MediaAssignmentController {
     this.pendingRevision += 1;
     this.pendingAssignments = [];
     this.fileDrop.destroy();
+  }
+
+  /** 割り当て画面を閉じ、必要ならキャンセルとしてログへ残す */
+  private finishAssignment(logClose: boolean): void {
+    this.pendingRevision += 1;
+    this.pendingAssignments = [];
+    this.view.renderOverlay(this.pendingAssignments, this.panelWasHiddenBeforeAssign);
+    if (logClose) this.options.log("D&D ASSIGN CLOSE");
   }
 
   /** ドロップされた素材を設定に応じて割り当て画面または直接割り当てへ送る */
@@ -129,20 +134,24 @@ export class MediaAssignmentController {
     const { panel } = this.options.ui;
     this.panelWasHiddenBeforeAssign = panel.classList.contains("hidden");
     panel.classList.add("hidden");
-    const pendingAssignments: PendingAssignment[] = [];
-    for (const file of valid) {
-      const kind = detectMediaFileKind(file) === "audio" ? "SFX" as const : "IMG" as const;
-      let preview = "";
-      if (kind === "IMG") {
-        try { preview = await createPanelPreview(file, 420); } catch { preview = ""; }
-      }
-      // 閉じた後や新しいドロップ後に古いプレビュー処理で画面を再表示しない
-      if (this.destroyed || revision !== this.pendingRevision) return;
-      pendingAssignments.push({ id: this.nextPendingAssignmentId++, file, kind, preview });
-    }
-    this.pendingAssignments = pendingAssignments;
+
+    // プレビュー生成を待たず先に割り当て画面を出し、重い画像でもD&Dが固まったように見せない
+    this.pendingAssignments = valid.map((file) => ({
+      id: this.nextPendingAssignmentId++,
+      file,
+      kind: detectMediaFileKind(file) === "audio" ? "SFX" as const : "IMG" as const,
+      preview: "",
+    }));
     this.view.renderOverlay(this.pendingAssignments, this.panelWasHiddenBeforeAssign);
     this.options.log(`D&D ASSIGN ${valid.length} FILE${valid.length === 1 ? "" : "S"}`);
+
+    await Promise.all(this.pendingAssignments.map(async (item) => {
+      if (item.kind !== "IMG") return;
+      try { item.preview = await createPanelPreview(item.file, 420); } catch { item.preview = ""; }
+    }));
+    // 閉じた後や新しいドロップ後に古いプレビュー処理で画面を再表示しない
+    if (this.destroyed || revision !== this.pendingRevision) return;
+    this.view.renderOverlay(this.pendingAssignments, this.panelWasHiddenBeforeAssign);
   }
 
   /** 未割り当て素材をIDで取り出して指定スロットへ移す */

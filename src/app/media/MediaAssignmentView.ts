@@ -67,7 +67,8 @@ export class MediaAssignmentView {
       const names: string[] = [];
       const slot = this.slots.get(index);
       if (slot.texture) names.push(`${slot.isGif ? "GIF" : "IMG"} ${slot.name}`);
-      if (slot.audioBuffer) names.push(`SFX ${slot.audioName}`);
+      if (slot.audioName) names.push(`SFX ${slot.audioName}`);
+      target.classList.toggle("has-audio", Boolean(slot.audioName));
       const label = target.querySelector("small");
       if (label) label.textContent = names.join(" + ") || "EMPTY";
     });
