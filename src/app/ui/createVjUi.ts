@@ -4,7 +4,21 @@ import {
   BPM_GRAPH_HTML,
   CONTROL_PANEL_HTML,
   KEY_GUIDE_HTML,
+  REMOTE_QR_HTML,
 } from "./templates";
+
+export interface RemoteHostElements {
+  status: HTMLElement;
+  count: HTMLElement;
+  showQrButton: HTMLButtonElement;
+  permissionInputs: Record<"cue" | "tapSync" | "record" | "clear", HTMLInputElement>;
+  stats: HTMLElement;
+  qrOverlay: HTMLElement;
+  qrImage: HTMLImageElement;
+  qrRoom: HTMLElement;
+  qrStatus: HTMLElement;
+  closeQrButton: HTMLButtonElement;
+}
 
 export interface VjUiElements {
   flashElement: HTMLElement;
@@ -20,6 +34,7 @@ export interface VjUiElements {
   assignTargets: HTMLElement;
   slotElements: HTMLElement[];
   cueButtons: HTMLButtonElement[];
+  remote: RemoteHostElements;
 }
 
 /** 必須の子要素を取得してテンプレート不整合を早期検出する */
@@ -72,6 +87,13 @@ export function createVjUi(host: HTMLElement): VjUiElements {
   assignOverlay.innerHTML = ASSIGN_OVERLAY_HTML;
   host.appendChild(assignOverlay);
 
+  const remoteQrOverlay = document.createElement("section");
+  remoteQrOverlay.className = "remote-qr-overlay";
+  remoteQrOverlay.hidden = true;
+  remoteQrOverlay.setAttribute("aria-label", "Remote controller QR code");
+  remoteQrOverlay.innerHTML = REMOTE_QR_HTML;
+  host.appendChild(remoteQrOverlay);
+
   const assignTargets = queryRequired<HTMLElement>(assignOverlay, ".assign-targets");
   for (let index = 0; index < 8; index += 1) {
     const target = document.createElement("button");
@@ -114,5 +136,22 @@ export function createVjUi(host: HTMLElement): VjUiElements {
     assignTargets,
     slotElements,
     cueButtons,
+    remote: {
+      status: queryRequired<HTMLElement>(panel, "[data-remote-status]"),
+      count: queryRequired<HTMLElement>(panel, "[data-remote-count]"),
+      showQrButton: queryRequired<HTMLButtonElement>(panel, "[data-action=show-qr]"),
+      permissionInputs: {
+        cue: queryRequired<HTMLInputElement>(panel, "[data-remote-permission=cue]"),
+        tapSync: queryRequired<HTMLInputElement>(panel, "[data-remote-permission=tapSync]"),
+        record: queryRequired<HTMLInputElement>(panel, "[data-remote-permission=record]"),
+        clear: queryRequired<HTMLInputElement>(panel, "[data-remote-permission=clear]"),
+      },
+      stats: queryRequired<HTMLElement>(panel, "[data-remote-stats]"),
+      qrOverlay: remoteQrOverlay,
+      qrImage: queryRequired<HTMLImageElement>(remoteQrOverlay, "[data-remote-qr]"),
+      qrRoom: queryRequired<HTMLElement>(remoteQrOverlay, "[data-remote-room]"),
+      qrStatus: queryRequired<HTMLElement>(remoteQrOverlay, "[data-remote-qr-status]"),
+      closeQrButton: queryRequired<HTMLButtonElement>(remoteQrOverlay, "[data-action=close-remote-qr]"),
+    },
   };
 }

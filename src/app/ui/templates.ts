@@ -52,6 +52,20 @@ export const CONTROL_PANEL_HTML = `
   <div class="slots-title">IMAGES / SFX <span>drop anywhere → fullscreen assign</span></div>
   <div class="slots"></div>
   <div class="effects"></div>
+  <section class="remote-controls" aria-label="Remote controller settings">
+    <div class="remote-head"><strong>REMOTE</strong><span data-remote-status>OFFLINE</span></div>
+    <div class="remote-count">Controllers: <b data-remote-count>0</b></div>
+    <button data-action="show-qr" class="remote-show">SHOW QR</button>
+    <fieldset>
+      <legend>AUDIENCE ALLOW</legend>
+      <label><input data-remote-permission="cue" type="checkbox" checked> CUE 1–9</label>
+      <label><input data-remote-permission="tapSync" type="checkbox"> TAP / SYNC</label>
+      <label><input data-remote-permission="record" type="checkbox"> RECORD</label>
+      <label><input data-remote-permission="clear" type="checkbox"> CLEAR</label>
+    </fieldset>
+    <div class="remote-transport"><span>Transport</span><b>WebSocket</b><span>Path</span><b>WS RELAY</b></div>
+    <div class="remote-stats" data-remote-stats><span>NO CONTROLLERS</span></div>
+  </section>
   <div class="panel-actions">
     <button data-action="record">REC [R]</button>
     <button data-action="midi">ENABLE MIDI</button>
@@ -68,4 +82,14 @@ export const ASSIGN_OVERLAY_HTML = `
   <div class="assign-sources"></div>
   <div class="assign-dest-title">DROP TO 1 / 2 / 3 / 4 / 5 / 6 / 7 / 8</div>
   <div class="assign-targets"></div>
+`;
+
+export const REMOTE_QR_HTML = `
+  <div class="remote-qr-card">
+    <div class="remote-qr-head"><strong>CHARACTER VJ REMOTE</strong><button data-action="close-remote-qr">CLOSE JOIN</button></div>
+    <p>Scan to join as an audience controller</p>
+    <img data-remote-qr alt="Character VJ controller QR code">
+    <small data-remote-room></small>
+    <div data-remote-qr-status>OPENING JOIN…</div>
+  </div>
 `;

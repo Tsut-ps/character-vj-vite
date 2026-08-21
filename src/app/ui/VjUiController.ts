@@ -184,6 +184,7 @@ export class VjUiController {
       this.elements.actionLog,
       this.elements.panel,
       this.elements.assignOverlay,
+      this.elements.remote.qrOverlay,
     ];
     roots.forEach((element) => element?.remove());
     this.host.classList.remove("background-hidden");
