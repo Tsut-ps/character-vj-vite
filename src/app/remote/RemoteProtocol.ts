@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 const REMOTE_PROTOCOL_VERSION = 1 as const;
+const REMOTE_COMMAND_MAX_BYTES = 1024;
 const REMOTE_SERVER_MESSAGE_MAX_BYTES = 64 * 1024;
 export const REMOTE_ROOM_RATE_LIMIT = 600;
 export const REMOTE_TICKET_PROTOCOL_PREFIX = "cvj-ticket.";
@@ -51,6 +52,20 @@ export const remoteEnvelopeSchema = z.object({
 export type RemoteCommand = z.infer<typeof remoteCommandSchema>;
 export type RemoteEnvelope = z.infer<typeof remoteEnvelopeSchema>;
 
+const rtcSdpSchema = z.string().min(1).max(20_000);
+const rtcIceCandidateSchema = z.object({
+  candidate: z.string().max(4_096),
+  sdpMid: z.string().max(256).nullable().optional(),
+  sdpMLineIndex: z.number().int().nonnegative().max(65_535).nullable().optional(),
+  usernameFragment: z.string().max(256).nullable().optional(),
+}).strict();
+
+export type RemoteIceCandidate = z.infer<typeof rtcIceCandidateSchema>;
+export type RemoteConnectionMode = "ws" | "direct";
+export type ControllerRtcSignal =
+  | { v: 1; type: "rtcAnswer"; sdp: string }
+  | { v: 1; type: "rtcIceCandidate"; candidate: RemoteIceCandidate };
+
 const hostClientMessageSchema = z.discriminatedUnion("type", [
   z.object({ v: z.literal(1), type: z.literal("openJoin"), requestId: z.string().uuid() }).strict(),
   z.object({ v: z.literal(1), type: z.literal("closeJoin"), requestId: z.string().uuid() }).strict(),
@@ -61,6 +76,18 @@ const hostClientMessageSchema = z.discriminatedUnion("type", [
     permissions: remotePermissionsSchema,
   }).strict(),
   z.object({ v: z.literal(1), type: z.literal("requestState"), requestId: z.string().uuid() }).strict(),
+  z.object({
+    v: z.literal(1),
+    type: z.literal("rtcOffer"),
+    controllerSessionId: z.string().uuid(),
+    sdp: rtcSdpSchema,
+  }).strict(),
+  z.object({
+    v: z.literal(1),
+    type: z.literal("rtcIceCandidate"),
+    controllerSessionId: z.string().uuid(),
+    candidate: rtcIceCandidateSchema,
+  }).strict(),
   z.object({
     v: z.literal(1),
     type: z.literal("ping"),
@@ -121,6 +148,24 @@ const serverMessageSchema = z.discriminatedUnion("type", [
     envelope: remoteEnvelopeSchema,
   }).strict(),
   z.object({ v: z.literal(1), type: z.literal("permissions"), permissions: remotePermissionsSchema }).strict(),
+  z.object({
+    v: z.literal(1),
+    type: z.literal("rtcOffer"),
+    controllerSessionId: z.string().uuid(),
+    sdp: rtcSdpSchema,
+  }).strict(),
+  z.object({
+    v: z.literal(1),
+    type: z.literal("rtcAnswer"),
+    controllerSessionId: z.string().uuid(),
+    sdp: rtcSdpSchema,
+  }).strict(),
+  z.object({
+    v: z.literal(1),
+    type: z.literal("rtcIceCandidate"),
+    controllerSessionId: z.string().uuid(),
+    candidate: rtcIceCandidateSchema,
+  }).strict(),
   z.object({ v: z.literal(1), type: z.literal("ping"), nonce: z.string().uuid() }).strict(),
   z.object({
     v: z.literal(1),
@@ -177,6 +222,18 @@ export function parseServerMessage(data: unknown): ServerMessage | null {
   try {
     const parsed: unknown = JSON.parse(data);
     const result = serverMessageSchema.safeParse(parsed);
+    return result.success ? result.data : null;
+  } catch {
+    return null;
+  }
+}
+
+/** DataChannel JSONを1 KiB上限とZodでRemoteEnvelopeへ検証する */
+export function parseRemoteEnvelopeMessage(data: unknown): RemoteEnvelope | null {
+  if (typeof data !== "string" || new TextEncoder().encode(data).byteLength > REMOTE_COMMAND_MAX_BYTES) return null;
+  try {
+    const parsed: unknown = JSON.parse(data);
+    const result = remoteEnvelopeSchema.safeParse(parsed);
     return result.success ? result.data : null;
   } catch {
     return null;
