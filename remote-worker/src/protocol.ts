@@ -7,6 +7,8 @@ export const PENDING_CONTROLLER_TICKET_TTL_MS = 60 * 1000;
 export const MAX_CONTROLLER_SESSIONS = 200;
 export const MAX_ACTIVE_CONTROLLERS = 100;
 export const MAX_ROOM_COMMANDS_PER_SECOND = 600;
+export const MAX_HOST_MESSAGES_PER_SECOND = 300;
+export const MAX_HOST_CONTROL_MESSAGES_PER_MINUTE = 30;
 
 const cueSchema = z.union([
   z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5),

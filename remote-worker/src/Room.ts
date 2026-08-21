@@ -7,6 +7,8 @@ import {
   isCommandAllowed,
   MAX_ACTIVE_CONTROLLERS,
   MAX_CONTROLLER_SESSIONS,
+  MAX_HOST_CONTROL_MESSAGES_PER_MINUTE,
+  MAX_HOST_MESSAGES_PER_SECOND,
   MAX_ROOM_COMMANDS_PER_SECOND,
   PENDING_CONTROLLER_TICKET_TTL_MS,
   parseJsonCandidate,
@@ -68,6 +70,8 @@ export interface JoinResult {
 export class Room extends Server<Env> {
   static options = { hibernate: true };
   private roomRate = { rateStartedAt: 0, rateCount: 0 };
+  private hostMessageRate = { rateStartedAt: 0, rateCount: 0 };
+  private hostControlRate = { rateStartedAt: 0, rateCount: 0 };
   private schemaReady = false;
   private currentHostConnectionId: string | null = null;
   private readonly currentControllerConnections = new Map<string, string>();
@@ -269,6 +273,10 @@ export class Room extends Server<Env> {
       state = { ...state, ...rate.state };
       controllerRateAllowed = rate.allowed;
       connection.setState(state);
+    } else {
+      const rate = checkCommandRate(this.hostMessageRate, Date.now(), MAX_HOST_MESSAGES_PER_SECOND);
+      this.hostMessageRate = rate.state;
+      if (!rate.allowed) return;
     }
     const text = this.messageText(message);
     if (text === null) {
@@ -402,6 +410,14 @@ export class Room extends Server<Env> {
       return;
     }
     const message = result.data;
+    if (message.type === "openJoin" || message.type === "closeJoin" || message.type === "setPermissions" || message.type === "requestState") {
+      const rate = checkCommandRate(this.hostControlRate, Date.now(), MAX_HOST_CONTROL_MESSAGES_PER_MINUTE, 60_000);
+      this.hostControlRate = rate.state;
+      if (!rate.allowed) {
+        this.sendError(connection, "rate_limited", "Host control rate exceeded");
+        return;
+      }
+    }
     if (message.type === "openJoin") await this.openJoin(connection, message.requestId);
     else if (message.type === "closeJoin") this.closeJoin(connection, message.requestId);
     else if (message.type === "setPermissions") this.setPermissions(connection, message);
@@ -591,6 +607,8 @@ export class Room extends Server<Env> {
       connection.close(4003, "Session expired");
     }
     this.roomRate = { rateStartedAt: 0, rateCount: 0 };
+    this.hostMessageRate = { rateStartedAt: 0, rateCount: 0 };
+    this.hostControlRate = { rateStartedAt: 0, rateCount: 0 };
     this.schemaReady = false;
     this.currentHostConnectionId = null;
     this.currentControllerConnections.clear();

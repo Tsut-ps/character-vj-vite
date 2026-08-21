@@ -261,4 +261,26 @@ describe("Worker edge security", () => {
     reconnect.close(1000, "done");
     host.close(1000, "done");
   });
+
+  it("Host control連打をSQLite更新前に制限する", async () => {
+    const roomId = crypto.randomUUID();
+    const hostToken = createSecretToken();
+    const hostTicket = createSecretToken();
+    await env.Room.getByName(roomId).initializeRoom(
+      await hashToken(hostToken),
+      await hashToken(hostTicket),
+      Date.now() + 60_000,
+    );
+    const response = await SELF.fetch(`https://worker.test/parties/room/${roomId}`, { headers: socketHeaders(hostTicket) });
+    const host = response.webSocket!;
+    const ready = waitForMessage(host, (message) => message.type === "ready");
+    host.accept();
+    await ready;
+    const limited = waitForMessage(host, (message) => message.type === "error" && message.code === "rate_limited");
+    for (let index = 0; index < 31; index += 1) {
+      host.send(JSON.stringify({ v: 1, type: "openJoin", requestId: crypto.randomUUID() }));
+    }
+    expect((await limited).code).toBe("rate_limited");
+    host.close(1000, "done");
+  });
 });

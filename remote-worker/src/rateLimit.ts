@@ -8,9 +8,9 @@ export interface CommandRateResult {
   state: CommandRateState;
 }
 
-/** controller単位で1秒60件まで許可し常駐timerを使わず窓を更新する */
-export function checkCommandRate(state: CommandRateState, now: number, limit = 60): CommandRateResult {
-  const current = now - state.rateStartedAt >= 1000
+/** 常駐timerを使わず指定時間窓のmessage数を制限する */
+export function checkCommandRate(state: CommandRateState, now: number, limit = 60, windowMs = 1000): CommandRateResult {
+  const current = now - state.rateStartedAt >= windowMs
     ? { rateStartedAt: now, rateCount: 0 }
     : state;
   const next = { rateStartedAt: current.rateStartedAt, rateCount: current.rateCount + 1 };
