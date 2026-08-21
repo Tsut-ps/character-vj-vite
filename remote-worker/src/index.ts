@@ -223,8 +223,6 @@ app.use("*", partyserverMiddleware<AppEnv>({
   onError: (error) => console.error(JSON.stringify({ event: "partyserver_error", message: error.message })),
 }));
 
-/** deploy監視用のsecret非依存health responseを返す */
-app.get("/health", (c) => c.json({ ok: true, service: "character-vj-remote" }));
 /** 未定義routeへJSON 404を返す */
 app.notFound((c) => c.json({ error: "not_found" }, 404));
 

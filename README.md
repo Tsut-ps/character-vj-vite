@@ -163,8 +163,6 @@ Hostから各Controllerへ1.5秒間隔でpingし、Hostの`performance.now()`だ
 - `src/controller/main.ts`
 - `src/controller/style.css`
 - `src/app/remote/RemoteProtocol.ts`
-- `src/app/remote/RemotePermissions.ts`
-- `src/app/remote/RemoteStats.ts`
 - `src/app/remote/RemoteInputAdapter.ts`
 - `src/app/remote/RemoteManager.ts`
 - `src/app/remote/WebSocketTransport.ts`

@@ -10,7 +10,6 @@ import {
   type RemotePermissions,
   type ServerMessage,
 } from "./RemoteProtocol";
-import { estimatedOneWay } from "./RemoteStats";
 import { WebSocketTransport, type RemoteTransport } from "./WebSocketTransport";
 
 interface PendingRequest {
@@ -398,7 +397,7 @@ export class RemoteManager {
     this.ui.stats.replaceChildren(...[...this.controllers].map((id, index) => {
       const row = document.createElement("div");
       const rtt = this.rttByController.get(id);
-      row.innerHTML = `<b>#${index + 1}</b><span>RTT ${rtt === undefined ? "—" : `${Math.round(rtt)} ms`}</span><span>One-way ${rtt === undefined ? "—" : estimatedOneWay(rtt)}</span>`;
+      row.innerHTML = `<b>#${index + 1}</b><span>RTT ${rtt === undefined ? "—" : `${Math.round(rtt)} ms`}</span><span>One-way ${rtt === undefined ? "—" : `~${Math.round(rtt / 2)} ms`}</span>`;
       return row;
     }));
   }

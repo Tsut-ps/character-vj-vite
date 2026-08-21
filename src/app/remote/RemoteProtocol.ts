@@ -1,8 +1,7 @@
 import { z } from "zod";
 
-export const REMOTE_PROTOCOL_VERSION = 1 as const;
-export const REMOTE_MESSAGE_MAX_BYTES = 1024;
-export const REMOTE_SERVER_MESSAGE_MAX_BYTES = 64 * 1024;
+const REMOTE_PROTOCOL_VERSION = 1 as const;
+const REMOTE_SERVER_MESSAGE_MAX_BYTES = 64 * 1024;
 export const REMOTE_ROOM_RATE_LIMIT = 600;
 export const REMOTE_TICKET_PROTOCOL_PREFIX = "cvj-ticket.";
 export const REMOTE_SESSION_MAX_MS = 60 * 60 * 1000;
@@ -14,7 +13,7 @@ const cueNumberSchema = z.union([
   z.literal(6), z.literal(7), z.literal(8), z.literal(9),
 ]);
 
-export const remotePermissionsSchema = z.object({
+const remotePermissionsSchema = z.object({
   cue: z.boolean(),
   tapSync: z.boolean(),
   record: z.boolean(),
@@ -30,7 +29,7 @@ export const DEFAULT_REMOTE_PERMISSIONS: RemotePermissions = {
   clear: false,
 };
 
-export const remoteCommandSchema = z.discriminatedUnion("type", [
+const remoteCommandSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("cue"),
     cue: cueNumberSchema,
@@ -52,12 +51,7 @@ export const remoteEnvelopeSchema = z.object({
 export type RemoteCommand = z.infer<typeof remoteCommandSchema>;
 export type RemoteEnvelope = z.infer<typeof remoteEnvelopeSchema>;
 
-export const controllerClientMessageSchema = z.union([
-  remoteEnvelopeSchema,
-  z.object({ v: z.literal(1), type: z.literal("pong"), nonce: z.string().uuid() }).strict(),
-]);
-
-export const hostClientMessageSchema = z.discriminatedUnion("type", [
+const hostClientMessageSchema = z.discriminatedUnion("type", [
   z.object({ v: z.literal(1), type: z.literal("openJoin"), requestId: z.string().uuid() }).strict(),
   z.object({ v: z.literal(1), type: z.literal("closeJoin"), requestId: z.string().uuid() }).strict(),
   z.object({
@@ -85,7 +79,7 @@ const controllerSummarySchema = z.object({
   controllerSessionId: z.string().uuid(),
 }).strict();
 
-export const serverMessageSchema = z.discriminatedUnion("type", [
+const serverMessageSchema = z.discriminatedUnion("type", [
   z.object({
     v: z.literal(1),
     type: z.literal("ready"),
