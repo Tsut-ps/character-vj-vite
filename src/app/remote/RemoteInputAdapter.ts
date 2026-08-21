@@ -96,13 +96,20 @@ export class RemoteInputAdapter {
       }
     }
     this.downCues.delete(controllerSessionId);
-    this.lastSeq.delete(controllerSessionId);
     this.rateWindows.delete(controllerSessionId);
   }
 
-  /** 全controllerのholdとreplay stateを破棄する */
+  /** 全controllerのholdを解放してseq replay stateは再接続用に保つ */
   releaseAllControllers(): void {
     for (const controllerSessionId of [...this.downCues.keys()]) this.releaseController(controllerSessionId);
+  }
+
+  /** Remote session終了時にholdとreplay stateを破棄する */
+  resetSession(): void {
+    this.releaseAllControllers();
+    this.lastSeq.clear();
+    this.rateWindows.clear();
+    this.roomRateWindow = { startedAt: 0, count: 0 };
   }
 
   /** 1秒窓で60件まで許可して異常連打だけを落とす */

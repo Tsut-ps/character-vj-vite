@@ -70,7 +70,7 @@ export class RemoteManager {
     }
     if (this.pingTimer !== null) window.clearInterval(this.pingTimer);
     this.pingTimer = null;
-    this.adapter.releaseAllControllers();
+    this.adapter.resetSession();
     this.transport?.close();
     this.transport = null;
     for (const request of this.pendingRequests.values()) {
@@ -177,15 +177,16 @@ export class RemoteManager {
   /** 切断時にholdとQRを安全側へ解放する */
   private handleClose(event: CloseEvent): void {
     if (this.destroyed) return;
+    const terminal = event.code === 4001 || event.code === 4003 || event.code === 4401 || event.code === 4403;
     this.ready = false;
     this.joinOpen = false;
-    this.adapter.releaseAllControllers();
+    if (terminal) this.adapter.resetSession();
+    else this.adapter.releaseAllControllers();
     this.controllers.clear();
     this.rttByController.clear();
     this.pendingPings.clear();
     this.renderControllerState();
     this.rejectPending("Remote connection closed");
-    const terminal = event.code === 4001 || event.code === 4003 || event.code === 4401 || event.code === 4403;
     if (terminal) {
       this.hideQrView();
       this.transport?.close();

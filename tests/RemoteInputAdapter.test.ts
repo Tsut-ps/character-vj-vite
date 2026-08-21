@@ -40,6 +40,25 @@ test("controller切断時にdown中Cueをすべて解放する", () => {
   assert.deepEqual(actions.slice(-2).map((action) => action.type === "cue" ? [action.cue, action.phase] : null), [[0, "up"], [2, "up"]]);
 });
 
+test("controller再接続後も古いseqを拒否する", () => {
+  const actions: AppAction[] = [];
+  const adapter = new RemoteInputAdapter((action) => actions.push(action));
+  const controller = crypto.randomUUID();
+  adapter.handle(controller, { v: 1, seq: 4, command: { type: "cue", cue: 1, state: "down" } }, 0);
+  adapter.releaseController(controller);
+  assert.equal(adapter.handle(controller, { v: 1, seq: 4, command: { type: "cue", cue: 1, state: "down" } }, 1), false);
+  assert.equal(adapter.handle(controller, { v: 1, seq: 5, command: { type: "cue", cue: 1, state: "down" } }, 2), true);
+});
+
+test("Remote session終了後は新しいseqを0から受け付ける", () => {
+  const actions: AppAction[] = [];
+  const adapter = new RemoteInputAdapter((action) => actions.push(action));
+  const controller = crypto.randomUUID();
+  adapter.handle(controller, { v: 1, seq: 4, command: { type: "cue", cue: 1, state: "down" } }, 0);
+  adapter.resetSession();
+  assert.equal(adapter.handle(controller, { v: 1, seq: 0, command: { type: "cue", cue: 1, state: "down" } }, 1), true);
+});
+
 test("permission違反とcue範囲外をHost側でも拒否する", () => {
   const actions: AppAction[] = [];
   const adapter = new RemoteInputAdapter((action) => actions.push(action));

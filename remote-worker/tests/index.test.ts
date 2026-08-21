@@ -1,4 +1,4 @@
-import { env, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { createSecretToken, hashToken } from "../src/auth";
 
@@ -11,6 +11,34 @@ function waitForClose(socket: WebSocket): Promise<CloseEvent> {
       resolve(event);
     });
   });
+}
+
+/** 条件に一致するJSON WebSocket messageをtimeout付きで待つ */
+function waitForMessage(socket: WebSocket, predicate: (message: Record<string, unknown>) => boolean): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("message timeout")), 5_000);
+    const onMessage = (event: MessageEvent): void => {
+      try {
+        const message = JSON.parse(String(event.data)) as Record<string, unknown>;
+        if (!predicate(message)) return;
+        clearTimeout(timer);
+        socket.removeEventListener("message", onMessage);
+        resolve(message);
+      } catch {
+        // 対象外messageを無視して次のserver messageを待つ
+      }
+    };
+    socket.addEventListener("message", onMessage);
+  });
+}
+
+/** session ticketをWebSocket subprotocolへ設定する */
+function socketHeaders(sessionTicket: string): HeadersInit {
+  return {
+    Origin: "https://tsut-ps.github.io",
+    Upgrade: "websocket",
+    "Sec-WebSocket-Protocol": `cvj-ticket.${sessionTicket}`,
+  };
 }
 
 describe("Worker edge security", () => {
@@ -131,5 +159,84 @@ describe("Worker edge security", () => {
     second.accept();
     expect((await firstClosed).code).toBe(4001);
     second.close(1000, "done");
+  });
+
+  it("操作中seqをattachmentへ保持して切断時だけSQLiteへ保存する", async () => {
+    const roomId = crypto.randomUUID();
+    const hostToken = createSecretToken();
+    const hostTicket = createSecretToken();
+    const controllerTicket = createSecretToken();
+    const controllerSessionId = crypto.randomUUID();
+    const expiresAt = Date.now() + 60_000;
+    const stub = env.Room.getByName(roomId);
+    await stub.initializeRoom(await hashToken(hostToken), await hashToken(hostTicket), expiresAt);
+    const joinSecret = createSecretToken();
+    await runInDurableObject(stub, async (_instance, state) => {
+      state.storage.sql.exec(
+        "UPDATE room_state SET join_open = 1, join_secret_hash = ? WHERE singleton = 1",
+        await hashToken(joinSecret),
+      );
+    });
+    expect((await stub.joinWithSecret(
+      joinSecret,
+      await hashToken(controllerTicket),
+      controllerSessionId,
+      expiresAt,
+    )).ok).toBe(true);
+
+    const hostResponse = await SELF.fetch(`https://worker.test/parties/room/${roomId}`, { headers: socketHeaders(hostTicket) });
+    const host = hostResponse.webSocket!;
+    const hostReady = waitForMessage(host, (message) => message.type === "ready");
+    host.accept();
+    await hostReady;
+
+    const controllerResponse = await SELF.fetch(`https://worker.test/parties/room/${roomId}`, { headers: socketHeaders(controllerTicket) });
+    const controller = controllerResponse.webSocket!;
+    const controllerReady = waitForMessage(controller, (message) => message.type === "ready");
+    controller.accept();
+    await controllerReady;
+
+    const firstRemote = waitForMessage(host, (message) => message.type === "remote");
+    controller.send(JSON.stringify({ v: 1, seq: 1, command: { type: "cue", cue: 1, state: "down" } }));
+    await firstRemote;
+    await runInDurableObject(stub, (_instance, state) => {
+      const row = state.storage.sql.exec<{ last_seq: number }>(
+        "SELECT last_seq FROM controllers WHERE session_id = ?",
+        controllerSessionId,
+      ).one();
+      expect(row.last_seq).toBe(-1);
+    });
+
+    const disconnected = waitForMessage(host, (message) => message.type === "controllerDisconnected");
+    controller.close(1000, "checkpoint");
+    await disconnected;
+    await runInDurableObject(stub, (_instance, state) => {
+      const row = state.storage.sql.exec<{ last_seq: number; current_connection_id: string | null }>(
+        "SELECT last_seq, current_connection_id FROM controllers WHERE session_id = ?",
+        controllerSessionId,
+      ).one();
+      expect(row).toEqual({ last_seq: 1, current_connection_id: null });
+    });
+
+    const reconnectResponse = await SELF.fetch(`https://worker.test/parties/room/${roomId}`, { headers: socketHeaders(controllerTicket) });
+    const reconnect = reconnectResponse.webSocket!;
+    const reconnectReady = waitForMessage(reconnect, (message) => message.type === "ready");
+    reconnect.accept();
+    await reconnectReady;
+    const forwardedSeq: number[] = [];
+    host.addEventListener("message", (event) => {
+      const message = JSON.parse(String(event.data)) as { type?: string; envelope?: { seq?: number } };
+      if (message.type === "remote" && typeof message.envelope?.seq === "number") forwardedSeq.push(message.envelope.seq);
+    });
+    const nextRemote = waitForMessage(host, (message) => {
+      const envelope = message.envelope as Record<string, unknown> | undefined;
+      return message.type === "remote" && envelope?.seq === 2;
+    });
+    reconnect.send(JSON.stringify({ v: 1, seq: 1, command: { type: "cue", cue: 1, state: "up" } }));
+    reconnect.send(JSON.stringify({ v: 1, seq: 2, command: { type: "cue", cue: 1, state: "up" } }));
+    await nextRemote;
+    expect(forwardedSeq).toEqual([2]);
+    reconnect.close(1000, "done");
+    host.close(1000, "done");
   });
 });
