@@ -16,6 +16,8 @@ import {
   permissionsSchema,
   sequenceIsFresh,
   SESSION_TICKET_TTL_MS,
+  signalingMessageSchema,
+  signalingPayloadWithinLimit,
   type HostMessage,
   type Permissions,
   type RemoteEnvelope,
@@ -287,12 +289,16 @@ export class Room extends Server<Env> {
     }
     const text = this.messageText(message);
     if (text === null) {
-      if (controllerRateAllowed) this.sendError(connection, "invalid_payload", "Message must be UTF-8 JSON under 1 KiB");
+      if (controllerRateAllowed) this.sendError(connection, "invalid_payload", "Message must be bounded UTF-8 JSON");
       return;
     }
     const candidate = parseJsonCandidate(text);
     if (candidate === null) {
       if (controllerRateAllowed) this.sendError(connection, "malformed_json", "Malformed JSON");
+      return;
+    }
+    if (!payloadWithinLimit(text) && !signalingMessageSchema.safeParse(candidate).success) {
+      if (controllerRateAllowed) this.sendError(connection, "invalid_payload", "Message exceeds allowed size");
       return;
     }
     if (state.role === "host") await this.handleHostMessage(connection, candidate);
@@ -431,9 +437,11 @@ export class Room extends Server<Env> {
     else if (message.type === "requestState") {
       this.sendAck(connection, message.requestId, message.type, true);
       this.sendState(connection);
+    } else if (message.type === "rtcOffer" || message.type === "rtcIceCandidate") {
+      this.sendToController(message.controllerSessionId, message);
     } else if (message.type === "ping") {
       this.sendToController(message.controllerSessionId, { v: 1, type: "ping", nonce: message.nonce });
-    } else {
+    } else if (message.type === "latency") {
       this.sendToController(message.controllerSessionId, { v: 1, type: "latency", rttMs: message.rttMs });
     }
   }
@@ -454,6 +462,18 @@ export class Room extends Server<Env> {
       connection.close(4002, "Controller reconnected");
       return;
     }
+    if ("type" in result.data && result.data.type === "rtcAnswer") {
+      if (controllerRateAllowed) {
+        this.sendToHosts({ ...result.data, controllerSessionId: state.controllerSessionId });
+      }
+      return;
+    }
+    if ("type" in result.data && result.data.type === "rtcIceCandidate") {
+      if (controllerRateAllowed) {
+        this.sendToHosts({ ...result.data, controllerSessionId: state.controllerSessionId });
+      }
+      return;
+    }
     const roomRate = checkCommandRate(this.roomRate, Date.now(), MAX_ROOM_COMMANDS_PER_SECOND);
     this.roomRate = roomRate.state;
     if ("type" in result.data && result.data.type === "pong") {
@@ -462,7 +482,7 @@ export class Room extends Server<Env> {
       }
       return;
     }
-    const envelope = result.data as RemoteEnvelope;
+    const envelope = result.data;
     if (!sequenceIsFresh(envelope.seq, state.lastSeq)) return;
 
     const cueUpForKnownDown = envelope.command.type === "cue"
@@ -569,10 +589,10 @@ export class Room extends Server<Env> {
     this.send(connection, { v: 1, type: "error", code, message });
   }
 
-  /** binaryと1 KiB超過messageをJSON parse前に拒否する */
+  /** binaryとsignaling上限超過messageをJSON parse前に拒否する */
   private messageText(message: WSMessage): string | null {
     if (typeof message !== "string") return null;
-    return payloadWithinLimit(message) ? message : null;
+    return signalingPayloadWithinLimit(message) ? message : null;
   }
 
   /** room stateの現在permissionsを安全な初期値付きで取得する */

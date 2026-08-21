@@ -272,6 +272,71 @@ describe("Worker edge security", () => {
     host.close(1000, "done");
   });
 
+  it("認証済みHostとController間だけWebRTC signalingを中継する", async () => {
+    const roomId = crypto.randomUUID();
+    const hostToken = createSecretToken();
+    const hostTicket = createSecretToken();
+    const controllerTicket = createSecretToken();
+    const controllerSessionId = crypto.randomUUID();
+    const expiresAt = Date.now() + 60_000;
+    const stub = env.Room.getByName(roomId);
+    await stub.initializeRoom(await hashToken(hostToken), await hashToken(hostTicket), expiresAt);
+    const joinSecret = createSecretToken();
+    await runInDurableObject(stub, async (_instance, state) => {
+      state.storage.sql.exec(
+        "UPDATE room_state SET join_open = 1, join_secret_hash = ? WHERE singleton = 1",
+        await hashToken(joinSecret),
+      );
+    });
+    expect((await stub.joinWithSecret(
+      joinSecret,
+      await hashToken(controllerTicket),
+      controllerSessionId,
+      expiresAt,
+    )).ok).toBe(true);
+
+    const hostResponse = await SELF.fetch(`https://worker.test/parties/room/${roomId}`, { headers: socketHeaders(hostTicket) });
+    const host = hostResponse.webSocket!;
+    const hostReady = waitForMessage(host, (message) => message.type === "ready");
+    host.accept();
+    await hostReady;
+    const controllerResponse = await SELF.fetch(`https://worker.test/parties/room/${roomId}`, { headers: socketHeaders(controllerTicket) });
+    const controller = controllerResponse.webSocket!;
+    const controllerReady = waitForMessage(controller, (message) => message.type === "ready");
+    controller.accept();
+    await controllerReady;
+
+    const offerReceived = waitForMessage(controller, (message) => message.type === "rtcOffer");
+    host.send(JSON.stringify({
+      v: 1,
+      type: "rtcOffer",
+      controllerSessionId,
+      sdp: `v=0\r\n${"a".repeat(2_000)}`,
+    }));
+    expect(await offerReceived).toMatchObject({ type: "rtcOffer", controllerSessionId });
+
+    const answerReceived = waitForMessage(host, (message) => message.type === "rtcAnswer");
+    controller.send(JSON.stringify({ v: 1, type: "rtcAnswer", sdp: "v=0\r\n" }));
+    expect(await answerReceived).toMatchObject({ type: "rtcAnswer", controllerSessionId });
+
+    const candidate = { candidate: "candidate:1", sdpMid: "0", sdpMLineIndex: 0, usernameFragment: null };
+    const controllerCandidate = waitForMessage(controller, (message) => message.type === "rtcIceCandidate");
+    host.send(JSON.stringify({ v: 1, type: "rtcIceCandidate", controllerSessionId, candidate }));
+    expect(await controllerCandidate).toMatchObject({ type: "rtcIceCandidate", controllerSessionId, candidate });
+    const hostCandidate = waitForMessage(host, (message) => message.type === "rtcIceCandidate");
+    controller.send(JSON.stringify({ v: 1, type: "rtcIceCandidate", candidate }));
+    expect(await hostCandidate).toMatchObject({ type: "rtcIceCandidate", controllerSessionId, candidate });
+
+    const controllerRejected = waitForMessage(controller, (message) => message.type === "error");
+    controller.send(JSON.stringify({ v: 1, type: "rtcOffer", controllerSessionId, sdp: "v=0" }));
+    expect(await controllerRejected).toMatchObject({ code: "forbidden_message" });
+    const hostRejected = waitForMessage(host, (message) => message.type === "error");
+    host.send(JSON.stringify({ v: 1, type: "rtcAnswer", controllerSessionId, sdp: "v=0" }));
+    expect(await hostRejected).toMatchObject({ code: "forbidden_message" });
+    controller.close(1000, "done");
+    host.close(1000, "done");
+  });
+
   it("Host control連打をSQLite更新前に制限する", async () => {
     const roomId = crypto.randomUUID();
     const hostToken = createSecretToken();
