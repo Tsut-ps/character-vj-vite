@@ -7,6 +7,8 @@ import { MediaAssignmentController } from "./media/MediaAssignmentController";
 import { SlotStore } from "./media/SlotStore";
 import { ForegroundRenderer } from "./rendering/ForegroundRenderer";
 import { StageRenderer } from "./rendering/StageRenderer";
+import { RemoteInputAdapter } from "./remote/RemoteInputAdapter";
+import { RemoteManager } from "./remote/RemoteManager";
 import { EFFECTS, type AppAction, type EffectId } from "./types";
 import { VjUiController } from "./ui/VjUiController";
 import { VjUiBindings } from "./ui/VjUiBindings";
@@ -46,6 +48,8 @@ export class VJApp {
     (action) => this.handleAction(action),
     (code, active) => this.uiController?.setKeyVisual(code, active),
   );
+  private remoteInput = new RemoteInputAdapter((action) => this.handleAction(action));
+  private remoteManager!: RemoteManager;
   private uiController!: VjUiController;
   private mediaAssignments!: MediaAssignmentController;
   private lastHudUpdate = 0;
@@ -137,6 +141,7 @@ export class VJApp {
     this.initialized = false;
     this.lifecycleAbort.abort();
     this.router.destroy();
+    this.remoteManager.destroy();
     this.mediaAssignments.destroy();
     cancelAnimationFrame(this.animationFrameId);
     this.animationFrameId = 0;
@@ -334,6 +339,12 @@ export class VJApp {
       setFpsLimit: (enabled) => this.setFpsLimit(enabled),
       log: (message) => this.logAction(message),
     });
+    this.remoteManager = new RemoteManager(
+      ui.remote,
+      this.remoteInput,
+      (message) => this.logAction(message),
+      this.lifecycleAbort.signal,
+    );
     new VjUiBindings(host, this.uiController, actions, this.lifecycleAbort.signal);
   }
 

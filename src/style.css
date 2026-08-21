@@ -5,6 +5,29 @@
   font-synthesis: none;
 }
 
+.remote-controls { margin-top: 10px; padding: 9px; border: 1px solid rgba(130,220,255,.28); background: rgba(3,20,28,.7); }
+.remote-head, .remote-count { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.remote-head span { color: #7fe6ff; font-size: 10px; letter-spacing: .08em; }
+.remote-count { margin: 6px 0; font-size: 11px; }
+.remote-start, .remote-show { width: 100%; min-height: 32px; border-color: #55d8ff !important; color: #a9edff !important; }
+.remote-show { margin-top: 5px; }
+.remote-controls fieldset { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px; margin: 8px 0; padding: 7px; border: 1px solid rgba(255,255,255,.15); }
+.remote-controls legend { padding: 0 4px; font-size: 9px; color: rgba(255,255,255,.65); }
+.remote-controls label { font-size: 9px; white-space: nowrap; }
+.remote-transport { display: grid; grid-template-columns: 1fr 1.2fr; gap: 2px 8px; font-size: 9px; }
+.remote-transport span { color: rgba(255,255,255,.55); }
+.remote-stats { margin-top: 6px; max-height: 80px; overflow: auto; font-size: 9px; color: rgba(255,255,255,.7); }
+.remote-stats > div { display: grid; grid-template-columns: 28px 1fr 1.3fr; gap: 4px; padding: 3px 0; border-top: 1px solid rgba(255,255,255,.08); }
+.remote-qr-overlay { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; background: rgba(0,0,0,.82); }
+.remote-qr-overlay[hidden] { display: none; }
+.remote-qr-card { width: min(86vw, 520px); padding: 18px; border: 1px solid #61dcff; background: #061117; box-shadow: 0 0 60px rgba(60,210,255,.22); text-align: center; }
+.remote-qr-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.remote-qr-head button { min-height: 34px; }
+.remote-qr-card p { color: rgba(255,255,255,.72); }
+.remote-qr-card img { display: block; width: min(68vw, 420px); height: auto; margin: 12px auto; background: white; }
+.remote-qr-card small { display: block; overflow-wrap: anywhere; color: rgba(255,255,255,.45); }
+.remote-qr-card [data-remote-qr-status] { margin-top: 8px; color: #7fe6ff; font-weight: 700; }
+
 * { box-sizing: border-box; }
 html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 body { background: #050505; }
@@ -56,6 +79,8 @@ body { background: #050505; }
   padding: 12px;
   border: 1px solid rgba(255,255,255,.18);
   background: #0a0a0a;
+  max-height: calc(100vh - 2.5rem);
+  overflow-y: auto;
   contain: paint;
   isolation: isolate;
   transition: opacity 120ms ease, transform 120ms ease;

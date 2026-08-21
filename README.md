@@ -88,6 +88,198 @@ npm install
 npm run dev
 ```
 
+## 観客スマホ Remote（WebSocket Relay）
+
+VJ Hostの `REMOTE` → `START REMOTE` で1時間のRemote sessionを開始し、`SHOW QR` から参加受付を開いて観客のスマートフォンをリモートコントローラーとして接続できます。現在のtransportはCloudflare WebSocket Relayのみです。WebRTC、TURN、DIRECT modeはまだ含みません。
+
+### Architecture
+
+```text
+Controller UI
+  → RemoteCommand + seq
+  → PartySocket（buffer disabled）
+  → Hono / hono-party
+  → Room PartyServer（1 room = 1 SQLite-backed Durable Object）
+  → Host WebSocketTransport
+  → RemoteInputAdapter
+  → AppAction
+  → VJApp / CueEngine
+```
+
+Cloudflare側はCueやBPM処理を持たず、検証済みRemoteCommandをControllerからHostへ転送するだけです。Controller同士へVJ操作をbroadcastしません。`RemoteTransport` interfaceを境界にしているため、将来別transportを追加しても`RemoteInputAdapter`以降は変更しない構成です。
+
+### Security model
+
+- Networkから`AppAction`を受け取らず、version付き`RemoteCommand`をZodでruntime validation
+- 通常client messageは1 KiBまで。不正JSON、未知version、未知command、範囲外Cueを拒否
+- identity、role、controllerSessionId、permissionsは認証済みWebSocket sessionからserver側で決定
+- Host token、QR用joinSecret、短期session ticketを分離。Host tokenはQRへ含めない
+- session ticketはURL queryへ置かずWebSocket subprotocolでUpgrade時だけ送る
+- joinSecretはURL queryではなくfragmentへ格納し、QR読取後すぐControllerのaddress barから除去
+- joinSecretとticketはWeb Cryptoで生成し、Durable ObjectへはSHA-256 hashだけを保存
+- `CLOSE JOIN` ACK前にjoinを閉じてsecretを無効化。再OPEN時は必ずsecretをローテーション
+- Controllerごとの単調増加seqをWorkerとHostの両方で検証
+- Controller切断時はHostがdown中Cueへ`cue up`を生成し、hold残留を防止
+- WorkerとHostの両方で約60 message/sec/controllerを上限にし、既知の`cue up`は解放優先
+- Room全体は600 message/sec、active controllerは100、未期限切れsessionは200を上限にする
+- 未接続Controller ticketと初回再接続は1分で失効し、WebSocket接続後だけRoom期限まで延長
+- Host制御操作は30回/分、Host全messageは300回/秒を上限にして書き込み連打を防止
+- Room createはIPごとに2回/分、Host ticket、JOIN、WebSocket UpgradeもRate Limiting bindingで制限し、緩いIP単位の総量制限を重ねる
+- WebSocket以外のPartyServer requestはDurable Objectへ渡さず`426`で拒否
+- PartySocketは`maxEnqueuedMessages: 0`かつOPEN時のみsendし、切断中の操作を再接続後に送らない
+- Host切断時はmemory上のHost tokenから短期ticketを再発行して1回だけ再接続し、Controller切断時は自動再JOINせずQR再読取を案内
+- Host tokenはRemote session中のmemoryだけに保持し、localStorageとsessionStorageへ保存しない
+- Remote roomと全WebSocket sessionはroom作成から最大1時間とし、期限切れ時はAlarmで接続とSQLite stateを完全削除
+- 本番CORSとWebSocket Originは`ALLOWED_ORIGINS`完全一致のみ。`*`は使用しない
+
+Room作成APIは公開Frontendから利用するため、Origin制限とRate LimitだけではHost本人認証になりません。自動作成への追加防御が必要な運用では、Cloudflare TurnstileまたはAccessを別途導入してください。
+
+### Host permissions
+
+初期値は `CUE 1–9` のみ許可です。Hostの `AUDIENCE ALLOW` から `TAP / SYNC`、`RECORD`、`CLEAR` を追加できます。Controller UIのdisableに加え、Durable ObjectとHostでも最終検証します。
+
+### RTT
+
+Hostから各Controllerへ1.5秒間隔でpingし、Hostの`performance.now()`だけでWS Relay RTTを計算します。Host UIにはControllerごとの `RTT` と `One-way ~RTT/2`、Controller UIにはRTTを表示します。
+
+### Frontend dependencies
+
+- `partysocket`: WebSocket client（stale操作のqueueとController自動再接続は無効）
+- `zod`: network protocol runtime validation
+- `qrcode`: Host QR生成
+- `@types/qrcode`: TypeScript型（development）
+
+### Worker dependencies
+
+- `hono`
+- `hono-party`
+- `partyserver`
+- `zod`
+- development: `wrangler`, `vitest`, `@cloudflare/vitest-pool-workers`, `@cloudflare/workers-types`, `typescript`
+
+`hono-party`のWorkers型peer範囲をWranglerが使うv5へ限定的に揃え、全peer dependencyを通常の`npm ci`で検証します。`legacy-peer-deps`は使用しません。
+
+### New files
+
+- `controller.html`
+- `src/controller/ControllerApp.ts`
+- `src/controller/ControllerCommandSender.ts`
+- `src/controller/ControllerConnection.ts`
+- `src/controller/ControllerCueTracker.ts`
+- `src/controller/main.ts`
+- `src/controller/style.css`
+- `src/app/remote/RemoteProtocol.ts`
+- `src/app/remote/RemoteInputAdapter.ts`
+- `src/app/remote/RemoteManager.ts`
+- `src/app/remote/WebSocketTransport.ts`
+- `remote-worker/` 以下のWorker、Room、設定、生成型、テスト
+- `.env.example`
+- `tests/RemoteInputAdapter.test.ts`
+- `tests/RemoteManager.test.ts`
+- `tests/RemoteProtocol.test.ts`
+- `tests/ControllerRemote.test.ts`
+
+### Changed files
+
+- `src/app/types.ts`: `InputSource`へ`remote`を追加
+- `src/app/VJApp.ts`: Remoteを既存`AppAction`経路へ接続
+- `src/app/ui/*`、`src/style.css`: Host sessionの明示開始、permissions、QR、RTT UI
+- `vite.config.ts`: `controller.html`をmulti-page entryへ追加
+- `package.json`、`package-lock.json`: Frontend依存とRemote testを追加
+- `.github/workflows/deploy.yml`: 既存Pages buildへ公開Worker URLだけを渡す
+- `README.md`: Remoteの構成と運用手順を追加
+
+GitHub PagesのActions、artifact upload、Pages deploy方法は変更していません。
+
+### Cloudflareで手動設定する項目
+
+1. Cloudflare accountでWorkersを利用可能にする
+2. `remote-worker/wrangler.jsonc` の `ALLOWED_ORIGINS` を実際のGitHub Pages Originへ設定する
+   - このrepositoryの既定値は `https://tsut-ps.github.io`
+   - `/character-vj-vite/` のようなpathはOriginへ含めない
+   - localhostを本番値へ追加しない
+3. `ratelimits` の `namespace_id`（`41001`〜`41005`）が同じaccount内の別bindingと重複しないことを確認する
+4. `npx wrangler login` でdeploy先accountを選択する
+
+Durable Object binding、SQLite migration、Rate Limiting bindingは`wrangler.jsonc`で宣言済みです。VITE環境変数やsourceへCloudflare API tokenなどのsecretを置かないでください。
+
+### GitHubで設定する環境変数
+
+Repositoryの `Settings` → `Secrets and variables` → `Actions` → `Variables` で次を設定します。
+
+```text
+VITE_REMOTE_BASE_URL=https://character-vj-remote.<YOUR_SUBDOMAIN>.workers.dev
+```
+
+公開URLなのでsecretではなくActions Variableです。末尾pathは付けません。既存Pages workflowのBuild stepだけがこの値をViteへ渡します。
+
+### Local development
+
+初回のみ両packageをinstallします。
+
+```bash
+npm install
+cd remote-worker
+npm install
+```
+
+Terminal 1でWorkerを起動します。`npm run dev` はlocalhost Originだけを明示許可します。
+
+```bash
+cd remote-worker
+npm run dev
+```
+
+Project rootへ`.env.local`を作ります（`.env.example`をコピーできます）。
+
+```text
+VITE_REMOTE_BASE_URL=http://localhost:8787
+```
+
+Terminal 2でFrontendを起動します。
+
+```bash
+npm run dev
+```
+
+同一PCでは `http://localhost:5173/character-vj-vite/` を開きます。実機スマホでlocal frontendを試す場合はHTTPSで到達可能なOriginを用意し、その完全なOriginをWorkerの`ALLOWED_ORIGINS`へ明示追加してください。
+
+### Worker deploy
+
+```bash
+cd remote-worker
+npm run typecheck
+npm test
+npx wrangler deploy --dry-run
+npm run deploy
+```
+
+初回deploy時に`Room`のSQLite-backed Durable Object migrationが適用されます。deploy後の`workers.dev` OriginをGitHubの`VITE_REMOTE_BASE_URL`へ設定し、Pagesを再buildします。
+
+### Production verification
+
+1. GitHub PagesのVJ画面を開き、既存のKeyboard、Gamepad、MIDI、D&D、SFX操作を確認
+2. `REMOTE` → `START REMOTE` でHostがONLINEになることを確認
+3. `SHOW QR` でOPEN JOIN ACK後にQRが表示されることを確認
+4. 2台以上のスマホでJOINし、Controller数と個別RTTが表示されることを確認
+5. 1〜9のtap/holdで既存Cue/Hold/AUTOが動作することを確認
+6. `CLOSE JOIN` 後に保存済みの古いQRから新規JOINできず、接続済みControllerは操作を継続できることを確認
+7. Permissionsを変更し、Controller UIとserver-side拒否の両方が反映されることを確認
+8. Cue hold中にスマホの通信を切るかページを離れ、Hostでholdが解放されることを確認
+9. Hostの一時切断時にHost ticketを再発行して再接続し、Controller切断時はQR再読取表示になることを確認
+10. Worker logでOrigin拒否、Rate limit、予期しないexceptionがないことを確認
+
+### Automated verification
+
+```bash
+npm run build
+npm run typecheck:test
+npm test
+cd remote-worker
+npm run typecheck
+npm test
+```
+
 ## ライセンス
 
 開発の息抜きにCodexに書いてもらっただけなので、Unlicenseとします。自由に使ってOKです

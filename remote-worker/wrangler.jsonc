@@ -1,0 +1,29 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "character-vj-remote",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "ALLOWED_ORIGINS": "https://tsut-ps.github.io"
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "Room", "class_name": "Room" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Room"] }
+  ],
+  "ratelimits": [
+    { "name": "ROOM_CREATE_RATE_LIMITER", "namespace_id": "41001", "simple": { "limit": 2, "period": 60 } },
+    { "name": "JOIN_RATE_LIMITER", "namespace_id": "41002", "simple": { "limit": 300, "period": 60 } },
+    { "name": "WS_RATE_LIMITER", "namespace_id": "41003", "simple": { "limit": 120, "period": 60 } },
+    { "name": "HOST_TICKET_RATE_LIMITER", "namespace_id": "41004", "simple": { "limit": 60, "period": 60 } },
+    { "name": "EDGE_ABUSE_RATE_LIMITER", "namespace_id": "41005", "simple": { "limit": 2000, "period": 60 } }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}
