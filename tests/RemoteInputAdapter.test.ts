@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { RemoteInputAdapter } from "../src/app/remote/RemoteInputAdapter.ts";
-import { parseServerMessage, type RemoteEnvelope } from "../src/app/remote/RemoteProtocol.ts";
+import { parseServerMessage } from "../src/app/remote/RemoteProtocol.ts";
 import type { AppAction } from "../src/app/types.ts";
 
 test("Remote cueをcontroller別sourceIdのAppActionへ変換する", () => {
@@ -65,7 +65,7 @@ test("permission違反とcue範囲外をHost側でも拒否する", () => {
   const controller = crypto.randomUUID();
   adapter.setPermissions({ cue: false, tapSync: false, record: false, clear: false });
   assert.equal(adapter.handle(controller, { v: 1, seq: 0, command: { type: "cue", cue: 1, state: "down" } }, 0), false);
-  const invalid = { v: 1, seq: 1, command: { type: "cue", cue: 10, state: "down" } } as unknown as RemoteEnvelope;
+  const invalid = { v: 1, seq: 1, command: { type: "cue", cue: 10, state: "down" } };
   assert.equal(adapter.handle(controller, invalid, 1), false);
   assert.equal(actions.length, 0);
 });

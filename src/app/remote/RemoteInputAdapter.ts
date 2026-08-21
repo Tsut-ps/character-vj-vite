@@ -4,7 +4,6 @@ import {
   DEFAULT_REMOTE_PERMISSIONS,
   REMOTE_ROOM_RATE_LIMIT,
   remoteEnvelopeSchema,
-  type RemoteEnvelope,
   type RemotePermissions,
 } from "./RemoteProtocol.ts";
 
@@ -35,7 +34,7 @@ export class RemoteInputAdapter {
   }
 
   /** schema、seq、rate、permissionを通過したcommandだけをAppActionへ変換する */
-  handle(controllerSessionId: string, candidate: RemoteEnvelope, now = performance.now()): boolean {
+  handle(controllerSessionId: string, candidate: unknown, now = performance.now()): boolean {
     const parsed = remoteEnvelopeSchema.safeParse(candidate);
     if (!parsed.success) return false;
     const envelope = parsed.data;
