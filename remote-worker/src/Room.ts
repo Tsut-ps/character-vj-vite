@@ -117,8 +117,15 @@ export class Room extends Server<Env> {
       ticketHash,
       roomExpiresAt,
     );
-    await this.ctx.storage.put("initialized", true);
-    await this.ctx.storage.setAlarm(roomExpiresAt);
+    try {
+      const initializedWrite = this.ctx.storage.put("initialized", true);
+      const alarmWrite = this.ctx.storage.setAlarm(roomExpiresAt);
+      await Promise.all([initializedWrite, alarmWrite]);
+    } catch (error) {
+      this.schemaReady = false;
+      await this.ctx.storage.deleteAll();
+      throw error;
+    }
     return true;
   }
 
