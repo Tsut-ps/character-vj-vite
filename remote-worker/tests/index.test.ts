@@ -14,6 +14,21 @@ function waitForClose(socket: WebSocket): Promise<CloseEvent> {
 }
 
 describe("Worker edge security", () => {
+  it("非WebSocketのPartyServer requestをDO到達前に拒否する", async () => {
+    const response = await SELF.fetch(`https://worker.test/parties/room/${crypto.randomUUID()}`);
+    expect({ status: response.status, body: await response.text() }).toEqual({ status: 426, body: "Upgrade Required" });
+  });
+
+  it("tokenを返すv1 responseをcache禁止にする", async () => {
+    const response = await SELF.fetch("https://worker.test/v1/rooms", {
+      method: "POST",
+      headers: { Origin: "https://tsut-ps.github.io", "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(response.status).toBe(201);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+  });
+
   it("session ticketなしWebSocket Upgradeを401で拒否する", async () => {
     const roomId = crypto.randomUUID();
     const response = await SELF.fetch(`https://worker.test/parties/room/${roomId}`, {

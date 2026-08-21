@@ -12,6 +12,7 @@ import {
   payloadWithinLimit,
   permissionsSchema,
   sequenceIsFresh,
+  SESSION_TICKET_TTL_MS,
   type HostMessage,
   type Permissions,
   type RemoteEnvelope,
@@ -36,6 +37,7 @@ type RoomRow = {
   join_secret_hash: string | null;
   permissions_json: string;
   current_host_connection_id: string | null;
+  expires_at: number;
 } & Record<string, SqlStorageValue>;
 
 type TicketRow = {
@@ -56,6 +58,7 @@ export interface JoinResult {
   ok: boolean;
   reason?: "forbidden" | "full";
   permissions?: Permissions;
+  expiresAt?: number;
 }
 
 /** 1 remote roomをSQLiteとhibernatable WebSocketで管理する */
@@ -63,59 +66,73 @@ export class Room extends Server<Env> {
   static options = { hibernate: true };
   private roomRate = { rateStartedAt: 0, rateCount: 0 };
 
-  /** PartyServer起動時に軽量なschema確認だけを行う */
-  onStart(): void {
+  /** PartyServer起動時にschemaとroom期限を復元する */
+  async onStart(): Promise<void> {
     this.ensureSchema();
+    if (!await this.ctx.storage.get<boolean>("initialized")) return;
+    const room = this.getRoom();
+    if (!room) return;
+    if (room.expires_at <= Date.now()) {
+      await this.expireRoom();
+      return;
+    }
+    await this.scheduleSessionAlarm(room.expires_at);
   }
 
-  /** 新規roomのhost hashと最初のticket hashを原子的に保存する */
+  /** 新規roomのhashと絶対期限を保存する */
   async initializeRoom(hostTokenHash: string, ticketHash: string, expiresAt: number): Promise<boolean> {
     if (await this.ctx.storage.get<boolean>("initialized")) return false;
+    const now = Date.now();
+    const roomExpiresAt = Math.min(expiresAt, now + SESSION_TICKET_TTL_MS);
+    if (!Number.isSafeInteger(expiresAt) || roomExpiresAt <= now) return false;
     this.ensureSchema();
     const existing = this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM room_state").one().count;
     if (existing > 0) return false;
     this.ctx.storage.sql.exec(
-      "INSERT INTO room_state (singleton, host_token_hash, join_open, join_secret_hash, permissions_json, current_host_connection_id, created_at) VALUES (1, ?, 0, NULL, ?, NULL, ?)",
+      "INSERT INTO room_state (singleton, host_token_hash, join_open, join_secret_hash, permissions_json, current_host_connection_id, created_at, expires_at) VALUES (1, ?, 0, NULL, ?, NULL, ?, ?)",
       hostTokenHash,
       JSON.stringify(DEFAULT_PERMISSIONS),
-      Date.now(),
+      now,
+      roomExpiresAt,
     );
     this.ctx.storage.sql.exec(
       "INSERT INTO tickets (ticket_hash, role, controller_session_id, expires_at) VALUES (?, 'host', NULL, ?)",
       ticketHash,
-      expiresAt,
+      roomExpiresAt,
     );
     await this.ctx.storage.put("initialized", true);
+    await this.ctx.storage.setAlarm(roomExpiresAt);
     return true;
   }
 
   /** host token検証後に再接続用host ticket hashを保存する */
-  async createHostTicket(hostToken: string, ticketHash: string, expiresAt: number): Promise<boolean> {
-    if (!await this.ctx.storage.get<boolean>("initialized")) return false;
-    this.ensureSchema();
-    const room = this.getRoom();
-    if (!room || !constantTimeEqual(room.host_token_hash, await hashToken(hostToken))) return false;
+  async createHostTicket(hostToken: string, ticketHash: string, expiresAt: number): Promise<number | null> {
+    const room = await this.getActiveRoom();
+    if (!room || !constantTimeEqual(room.host_token_hash, await hashToken(hostToken))) return null;
+    const ticketExpiresAt = Math.min(expiresAt, room.expires_at);
+    if (!Number.isSafeInteger(expiresAt) || ticketExpiresAt <= Date.now()) return null;
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec("DELETE FROM tickets WHERE role = 'host'");
       this.ctx.storage.sql.exec(
         "INSERT INTO tickets (ticket_hash, role, controller_session_id, expires_at) VALUES (?, 'host', NULL, ?)",
         ticketHash,
-        expiresAt,
+        ticketExpiresAt,
       );
     });
-    return true;
+    return ticketExpiresAt;
   }
 
   /** join状態とsecretを検証してcontroller sessionを発行可能にする */
   async joinWithSecret(joinSecret: string, ticketHash: string, controllerSessionId: string, expiresAt: number): Promise<JoinResult> {
-    if (!await this.ctx.storage.get<boolean>("initialized")) return { ok: false, reason: "forbidden" };
-    this.ensureSchema();
-    const room = this.getRoom();
+    const room = await this.getActiveRoom();
+    if (!room) return { ok: false, reason: "forbidden" };
     const candidateHash = await hashToken(joinSecret);
-    if (!room || room.join_open !== 1 || !room.join_secret_hash || !constantTimeEqual(room.join_secret_hash, candidateHash)) {
+    if (room.expires_at <= Date.now() || room.join_open !== 1 || !room.join_secret_hash || !constantTimeEqual(room.join_secret_hash, candidateHash)) {
       return { ok: false, reason: "forbidden" };
     }
     const now = Date.now();
+    const ticketExpiresAt = Math.min(expiresAt, room.expires_at);
+    if (!Number.isSafeInteger(expiresAt) || ticketExpiresAt <= now) return { ok: false, reason: "forbidden" };
     const inserted = this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec("DELETE FROM tickets WHERE expires_at < ?", now);
       this.ctx.storage.sql.exec(
@@ -132,18 +149,18 @@ export class Room extends Server<Env> {
         "INSERT INTO tickets (ticket_hash, role, controller_session_id, expires_at) VALUES (?, 'controller', ?, ?)",
         ticketHash,
         controllerSessionId,
-        expiresAt,
+        ticketExpiresAt,
       );
       return true;
     });
     if (!inserted) return { ok: false, reason: "full" };
-    return { ok: true, permissions: this.parsePermissions(room.permissions_json) };
+    return { ok: true, permissions: this.parsePermissions(room.permissions_json), expiresAt: ticketExpiresAt };
   }
 
   /** WebSocket Upgrade前に短期ticketをroomとroleへ結び付ける */
   async authorizeWebSocket(ticket: string): Promise<WebSocketAuthorization> {
-    if (!await this.ctx.storage.get<boolean>("initialized")) return { ok: false };
-    this.ensureSchema();
+    const room = await this.getActiveRoom();
+    if (!room) return { ok: false };
     const now = Date.now();
     this.ctx.storage.sql.exec("DELETE FROM tickets WHERE expires_at < ?", now);
     const ticketHash = await hashToken(ticket);
@@ -151,7 +168,7 @@ export class Room extends Server<Env> {
       "SELECT role, controller_session_id, expires_at FROM tickets WHERE ticket_hash = ?",
       ticketHash,
     ).toArray()[0];
-    if (!row || row.expires_at < now) return { ok: false };
+    if (!row || row.expires_at < now || room.expires_at <= now) return { ok: false };
     if (row.role === "controller") {
       if (!row.controller_session_id) return { ok: false };
       const controller = this.ctx.storage.sql.exec<{ count: number }>(
@@ -164,8 +181,8 @@ export class Room extends Server<Env> {
       ok: true,
       role: row.role,
       controllerSessionId: row.controller_session_id ?? undefined,
-      expiresAt: row.expires_at,
-      permissions: this.currentPermissions(),
+      expiresAt: Math.min(row.expires_at, room.expires_at),
+      permissions: this.parsePermissions(room.permissions_json),
     };
   }
 
@@ -217,6 +234,10 @@ export class Room extends Server<Env> {
       connection.close(4401, "Missing connection state");
       return;
     }
+    if (initialState.sessionExpiresAt <= Date.now()) {
+      connection.close(4003, "Session expired");
+      return;
+    }
     let state = initialState;
     let controllerRateAllowed = true;
     if (state.role === "controller") {
@@ -240,9 +261,10 @@ export class Room extends Server<Env> {
   }
 
   /** current接続だけを切断扱いにしてhostへcontroller解放を通知する */
-  onClose(connection: Connection<RemoteConnectionState>): void {
+  async onClose(connection: Connection<RemoteConnectionState>): Promise<void> {
     const state = connection.state;
     if (!state) return;
+    if (!await this.ctx.storage.get<boolean>("initialized")) return;
     if (state.role === "host") {
       const room = this.getRoom();
       if (room?.current_host_connection_id === connection.id) {
@@ -265,13 +287,14 @@ export class Room extends Server<Env> {
   /** 期限切れconnectionを閉じて次のsession期限だけをalarmへ登録する */
   async onAlarm(): Promise<void> {
     const now = Date.now();
-    let nextExpiry = Number.POSITIVE_INFINITY;
-    const room = this.getRoom();
+    const room = await this.getActiveRoom(now);
+    if (!room) return;
+    let nextExpiry = room.expires_at;
     for (const connection of this.getConnections<RemoteConnectionState>()) {
       const state = connection.state;
       if (!state) continue;
       if (state.sessionExpiresAt <= now) {
-        if (state.role === "host" && room?.current_host_connection_id === connection.id) {
+        if (state.role === "host" && room.current_host_connection_id === connection.id) {
           this.ctx.storage.sql.exec(
             "UPDATE room_state SET current_host_connection_id = NULL, join_open = 0, join_secret_hash = NULL WHERE singleton = 1",
           );
@@ -281,7 +304,7 @@ export class Room extends Server<Env> {
         nextExpiry = Math.min(nextExpiry, state.sessionExpiresAt);
       }
     }
-    if (Number.isFinite(nextExpiry)) await this.ctx.storage.setAlarm(nextExpiry);
+    await this.ctx.storage.setAlarm(nextExpiry);
   }
 
   /** 接続roleとcontroller identityを検索用tagへ変換する */
@@ -521,11 +544,29 @@ export class Room extends Server<Env> {
     if (current === null || expiresAt < current) await this.ctx.storage.setAlarm(expiresAt);
   }
 
+  /** 期限内のroomだけを返し期限切れstateを完全削除する */
+  private async getActiveRoom(now = Date.now()): Promise<RoomRow | undefined> {
+    if (!await this.ctx.storage.get<boolean>("initialized")) return undefined;
+    const room = this.getRoom();
+    if (room && room.expires_at > now) return room;
+    await this.expireRoom();
+    return undefined;
+  }
+
+  /** 接続を終了してroomのSQLiteと認証情報を解放する */
+  private async expireRoom(): Promise<void> {
+    for (const connection of this.getConnections<RemoteConnectionState>()) {
+      connection.close(4003, "Session expired");
+    }
+    this.roomRate = { rateStartedAt: 0, rateCount: 0 };
+    await this.ctx.storage.deleteAll();
+  }
+
   /** singleton room rowを取得する */
   private getRoom(): RoomRow | undefined {
     this.ensureSchema();
     return this.ctx.storage.sql.exec<RoomRow>(
-      "SELECT host_token_hash, join_open, join_secret_hash, permissions_json, current_host_connection_id FROM room_state WHERE singleton = 1",
+      "SELECT host_token_hash, join_open, join_secret_hash, permissions_json, current_host_connection_id, expires_at FROM room_state WHERE singleton = 1",
     ).toArray()[0];
   }
 
@@ -539,7 +580,8 @@ export class Room extends Server<Env> {
         join_secret_hash TEXT,
         permissions_json TEXT NOT NULL,
         current_host_connection_id TEXT,
-        created_at INTEGER NOT NULL
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL DEFAULT 0
       );
       CREATE TABLE IF NOT EXISTS tickets (
         ticket_hash TEXT PRIMARY KEY,
@@ -554,6 +596,26 @@ export class Room extends Server<Env> {
         current_connection_id TEXT,
         created_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS _sql_schema_migrations (
+        id INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
     `);
+    const schemaVersion = this.ctx.storage.sql.exec<{ version: number }>(
+      "SELECT COALESCE(MAX(id), 0) AS version FROM _sql_schema_migrations",
+    ).one().version;
+    if (schemaVersion < 1) {
+      const expiryColumn = this.ctx.storage.sql.exec<{ name: string }>("PRAGMA table_info(room_state)")
+        .toArray()
+        .some((column) => column.name === "expires_at");
+      if (!expiryColumn) {
+        this.ctx.storage.sql.exec("ALTER TABLE room_state ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0");
+        this.ctx.storage.sql.exec(
+          "UPDATE room_state SET expires_at = created_at + ? WHERE expires_at = 0",
+          SESSION_TICKET_TTL_MS,
+        );
+      }
+      this.ctx.storage.sql.exec("INSERT INTO _sql_schema_migrations (id) VALUES (1)");
+    }
   }
 }

@@ -1,4 +1,4 @@
-import { env, runInDurableObject } from "cloudflare:test";
+import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { constantTimeEqual, createSecretToken, hashToken } from "../src/auth";
 import type { Room } from "../src/Room";
@@ -109,7 +109,7 @@ describe("Room secret and ticket lifecycle", () => {
       await hashToken(nextTicket),
       Date.now() + 60_000,
     );
-    expect(created).toBe(true);
+    expect(created).toBe(fixture.expiresAt);
     expect((await fixture.stub.authorizeWebSocket(fixture.hostTicket)).ok).toBe(false);
     expect((await fixture.stub.authorizeWebSocket(nextTicket)).role).toBe("host");
   });
@@ -120,6 +120,54 @@ describe("Room secret and ticket lifecycle", () => {
     expect(result.ok).toBe(false);
     await runInDurableObject(stub, async (_instance, state) => {
       expect(await state.storage.get("initialized")).toBeUndefined();
+    });
+  });
+
+  it("room作成時に絶対期限のalarmを設定する", async () => {
+    const fixture = await createFixture();
+    await runInDurableObject(fixture.stub, async (_instance, state) => {
+      expect(await state.storage.getAlarm()).toBe(fixture.expiresAt);
+    });
+  });
+
+  it("再発行ticketをroom期限より延長しない", async () => {
+    const fixture = await createFixture();
+    const hostExpiry = await fixture.stub.createHostTicket(
+      fixture.hostToken,
+      await hashToken(createSecretToken()),
+      Date.now() + 3_600_000,
+    );
+    expect(hostExpiry).toBe(fixture.expiresAt);
+
+    const secret = createSecretToken();
+    await setJoin(fixture.stub, true, secret);
+    const joined = await fixture.stub.joinWithSecret(
+      secret,
+      await hashToken(createSecretToken()),
+      crypto.randomUUID(),
+      Date.now() + 3_600_000,
+    );
+    expect(joined.expiresAt).toBe(fixture.expiresAt);
+  });
+
+  it("期限切れroomの認証情報とSQLiteを完全削除する", async () => {
+    const fixture = await createFixture();
+    await runInDurableObject(fixture.stub, (_instance, state) => {
+      state.storage.sql.exec("UPDATE room_state SET expires_at = ? WHERE singleton = 1", Date.now() - 1);
+    });
+    expect(await runDurableObjectAlarm(fixture.stub)).toBe(true);
+    expect((await fixture.stub.authorizeWebSocket(fixture.hostTicket)).ok).toBe(false);
+    expect(await fixture.stub.createHostTicket(
+      fixture.hostToken,
+      await hashToken(createSecretToken()),
+      Date.now() + 60_000,
+    )).toBeNull();
+    await runInDurableObject(fixture.stub, async (_instance, state) => {
+      expect(await state.storage.get("initialized")).toBeUndefined();
+      const tables = state.storage.sql.exec<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE name IN ('room_state', 'tickets', 'controllers')",
+      ).toArray();
+      expect(tables).toEqual([]);
     });
   });
 

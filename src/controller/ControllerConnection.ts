@@ -74,7 +74,7 @@ export class ControllerConnection {
           if (event.code === 4003) {
             this.destroyed = true;
             this.transport?.close();
-            this.events.onStatus("error", "Session expired after 1 hour");
+            this.events.onStatus("error", "Remote session expired");
           } else {
             this.events.onStatus("disconnected");
           }
