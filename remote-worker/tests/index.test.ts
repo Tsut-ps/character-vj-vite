@@ -88,6 +88,16 @@ describe("Worker edge security", () => {
     expect(response.status).toBe(401);
   });
 
+  it("UUIDに見える不正room IDをDO到達前に拒否する", async () => {
+    const roomId = "------------------------------------";
+    const response = await SELF.fetch(`https://worker.test/v1/rooms/${roomId}/join`, {
+      method: "POST",
+      headers: { Origin: "https://tsut-ps.github.io", "content-type": "application/json" },
+      body: JSON.stringify({ joinSecret: createSecretToken() }),
+    });
+    expect(response.status).toBe(400);
+  });
+
   it("許可外OriginのWebSocket Upgradeを403で拒否する", async () => {
     const roomId = crypto.randomUUID();
     const response = await SELF.fetch(`https://worker.test/parties/room/${roomId}`, {

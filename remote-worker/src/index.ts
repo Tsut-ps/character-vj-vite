@@ -2,7 +2,7 @@ import { Hono, type Context, type Next } from "hono";
 import { partyserverMiddleware } from "hono-party";
 import { createSecretToken, hashToken } from "./auth";
 import { Room } from "./Room";
-import { hostTicketRequestSchema, joinRequestSchema, SESSION_TICKET_TTL_MS } from "./protocol";
+import { hostTicketRequestSchema, joinRequestSchema, roomIdSchema, SESSION_TICKET_TTL_MS } from "./protocol";
 
 type AppEnv = { Bindings: Env };
 
@@ -137,7 +137,7 @@ app.post("/v1/rooms", async (c) => {
 app.post("/v1/rooms/:roomId/host-ticket", async (c) => {
   if (!originAllowed(c.req.raw, c.env)) return c.json({ error: "origin_forbidden" }, 403);
   const roomId = c.req.param("roomId");
-  if (!/^[0-9a-f-]{36}$/iu.test(roomId)) return c.json({ error: "invalid_room" }, 400);
+  if (!roomIdSchema.safeParse(roomId).success) return c.json({ error: "invalid_room" }, 400);
   const [actorRate, roomRate] = await Promise.all([
     c.env.HOST_TICKET_RATE_LIMITER.limit({ key: `host-ticket-actor:${requestActorKey(c.req.raw)}` }),
     c.env.HOST_TICKET_RATE_LIMITER.limit({ key: `host-ticket-room:${roomId}` }),
@@ -160,7 +160,7 @@ app.post("/v1/rooms/:roomId/host-ticket", async (c) => {
 app.post("/v1/rooms/:roomId/join", async (c) => {
   if (!originAllowed(c.req.raw, c.env)) return c.json({ error: "origin_forbidden" }, 403);
   const roomId = c.req.param("roomId");
-  if (!/^[0-9a-f-]{36}$/iu.test(roomId)) return c.json({ error: "invalid_room" }, 400);
+  if (!roomIdSchema.safeParse(roomId).success) return c.json({ error: "invalid_room" }, 400);
   const [actorRate, roomRate] = await Promise.all([
     c.env.JOIN_RATE_LIMITER.limit({ key: `join-actor:${requestActorKey(c.req.raw)}` }),
     c.env.JOIN_RATE_LIMITER.limit({ key: `join-room:${roomId}` }),
@@ -195,7 +195,7 @@ app.post("/v1/rooms/:roomId/join", async (c) => {
 app.use("*", partyserverMiddleware<AppEnv>({
   options: {
     onBeforeConnect: async (request, lobby, c) => {
-      if (lobby.className !== "Room" || !/^[0-9a-f-]{36}$/iu.test(lobby.name)) return new Response("Not Found", { status: 404 });
+      if (lobby.className !== "Room" || !roomIdSchema.safeParse(lobby.name).success) return new Response("Not Found", { status: 404 });
       if (!originAllowed(request, c.env)) return new Response("Forbidden Origin", { status: 403 });
       const ticket = sessionTicketFromRequest(request);
       if (!ticket) return new Response("Missing session ticket", { status: 401 });

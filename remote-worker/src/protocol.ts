@@ -71,6 +71,7 @@ export type HostMessage = z.infer<typeof hostMessageSchema>;
 
 export const joinRequestSchema = z.object({ joinSecret: z.string().min(32).max(256) }).strict();
 export const hostTicketRequestSchema = z.object({ hostToken: z.string().min(32).max(256) }).strict();
+export const roomIdSchema = z.string().uuid();
 
 /** JSON parse失敗をexceptionとしてmessage handler外へ漏らさない */
 export function parseJsonCandidate(text: string): unknown | null {
