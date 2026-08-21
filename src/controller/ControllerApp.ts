@@ -33,10 +33,9 @@ export class ControllerApp {
       this.setStatus("error", "Invalid or incomplete QR URL");
       return;
     }
+    window.history.replaceState(null, "", `${window.location.pathname}#room=${encodeURIComponent(roomId)}`);
     try {
       await this.connection.join(roomId, joinSecret);
-      // JOIN後はaddress barや画面共有へsecretが残らないようfragmentから除去する
-      window.history.replaceState(null, "", `${window.location.pathname}#room=${encodeURIComponent(roomId)}`);
     } catch (error) {
       this.setStatus("error", error instanceof Error ? error.message : "JOIN failed");
     }
