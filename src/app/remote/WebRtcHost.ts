@@ -75,7 +75,18 @@ export class WebRtcHost implements RemoteWebRtcHost {
       return;
     }
     if (!sameConfig) this.closeAll();
-    for (const controllerSessionId of controllerSessionIds) this.ensurePeer(controllerSessionId);
+
+    const allowed = new Set(controllerSessionIds);
+
+    for (const controllerSessionId of [...this.peers.keys()]) {
+      if (!allowed.has(controllerSessionId)) {
+        this.closePeer(controllerSessionId);
+      }
+    }
+
+    for (const controllerSessionId of allowed) {
+      this.ensurePeer(controllerSessionId);
+    }
   }
 
   controllerConnected(controllerSessionId: string): void {
