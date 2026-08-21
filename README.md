@@ -115,13 +115,15 @@ Cloudflare側はCueやBPM処理を持たず、検証済みRemoteCommandをContro
 - identity、role、controllerSessionId、permissionsは認証済みWebSocket sessionからserver側で決定
 - Host token、QR用joinSecret、短期session ticketを分離。Host tokenはQRへ含めない
 - session ticketはURL queryへ置かずWebSocket subprotocolでUpgrade時だけ送る
-- joinSecretはURL queryではなくfragmentへ格納し、JOIN成功後はControllerのaddress barから除去
+- joinSecretはURL queryではなくfragmentへ格納し、QR読取後すぐControllerのaddress barから除去
 - joinSecretとticketはWeb Cryptoで生成し、Durable ObjectへはSHA-256 hashだけを保存
 - `CLOSE JOIN` ACK前にjoinを閉じてsecretを無効化。再OPEN時は必ずsecretをローテーション
 - Controllerごとの単調増加seqをWorkerとHostの両方で検証
 - Controller切断時はHostがdown中Cueへ`cue up`を生成し、hold残留を防止
 - WorkerとHostの両方で約60 message/sec/controllerを上限にし、既知の`cue up`は解放優先
 - Room全体は600 message/sec、active controllerは100、未期限切れsessionは200を上限にする
+- 未接続Controller ticketと初回再接続は1分で失効し、WebSocket接続後だけRoom期限まで延長
+- Host制御操作は30回/分、Host全messageは300回/秒を上限にして書き込み連打を防止
 - Room createはIPごとに2回/分、Host ticket、JOIN、WebSocket UpgradeもRate Limiting bindingで制限し、緩いIP単位の総量制限を重ねる
 - WebSocket以外のPartyServer requestはDurable Objectへ渡さず`426`で拒否
 - PartySocketは`maxEnqueuedMessages: 0`かつOPEN時のみsendし、切断中の操作を再接続後に送らない
@@ -170,6 +172,7 @@ Hostから各Controllerへ1.5秒間隔でpingし、Hostの`performance.now()`だ
 - `remote-worker/.npmrc`: Worker生成型を使い、依存package間のoptional Workers型peer差異を分離
 - `.env.example`
 - `tests/RemoteInputAdapter.test.ts`
+- `tests/RemoteProtocol.test.ts`
 
 ### Changed files
 
