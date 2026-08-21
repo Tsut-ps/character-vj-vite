@@ -153,7 +153,9 @@ Hostから各Controllerへ1.5秒間隔でpingし、Hostの`performance.now()`だ
 - `hono-party`
 - `partyserver`
 - `zod`
-- development: `wrangler`, `vitest`, `@cloudflare/vitest-pool-workers`, `typescript`
+- development: `wrangler`, `vitest`, `@cloudflare/vitest-pool-workers`, `@cloudflare/workers-types`, `typescript`
+
+`hono-party`のWorkers型peer範囲をWranglerが使うv5へ限定的に揃え、全peer dependencyを通常の`npm ci`で検証します。`legacy-peer-deps`は使用しません。
 
 ### New files
 
@@ -167,7 +169,6 @@ Hostから各Controllerへ1.5秒間隔でpingし、Hostの`performance.now()`だ
 - `src/app/remote/RemoteManager.ts`
 - `src/app/remote/WebSocketTransport.ts`
 - `remote-worker/` 以下のWorker、Room、設定、生成型、テスト
-- `remote-worker/.npmrc`: Worker生成型を使い、依存package間のoptional Workers型peer差異を分離
 - `.env.example`
 - `tests/RemoteInputAdapter.test.ts`
 - `tests/RemoteProtocol.test.ts`
