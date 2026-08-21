@@ -88,30 +88,37 @@ npm install
 npm run dev
 ```
 
-## 観客スマホ Remote（WebSocket Relay）
+## 観客スマホ Remote（WebSocket Relay / WebRTC DIRECT）
 
-VJ Hostの `REMOTE` → `START REMOTE` で1時間のRemote sessionを開始し、`SHOW QR` から参加受付を開いて観客のスマートフォンをリモートコントローラーとして接続できます。現在のtransportはCloudflare WebSocket Relayのみです。WebRTC、TURN、DIRECT modeはまだ含みません。
+VJ Hostの `REMOTE` → `START REMOTE` で1時間のRemote sessionを開始し、`SHOW QR` から参加受付を開いて観客のスマートフォンをリモートコントローラーとして接続できます。標準はCloudflare WebSocket Relayで、HostとControllerの両方が手動選択した場合だけWebRTC DIRECTを使用します。TURNと自動fallbackはまだ含みません。
 
 ### Architecture
 
 ```text
 Controller UI
   → RemoteCommand + seq
-  → PartySocket（buffer disabled）
-  → Hono / hono-party
-  → Room PartyServer（1 room = 1 SQLite-backed Durable Object）
-  → Host WebSocketTransport
+  → WS RELAY: PartySocket → Room PartyServer → Host
+  → DIRECT: reliable ordered DataChannel → Host
   → RemoteInputAdapter
   → AppAction
   → VJApp / CueEngine
+
+WebRTC signaling
+  → rtcOffer / rtcAnswer / rtcIceCandidate
+  → 認証済みPartySocket
+  → Room PartyServer
 ```
 
-Cloudflare側はCueやBPM処理を持たず、検証済みRemoteCommandをControllerからHostへ転送するだけです。Controller同士へVJ操作をbroadcastしません。`RemoteTransport` interfaceを境界にしているため、将来別transportを追加しても`RemoteInputAdapter`以降は変更しない構成です。
+Cloudflare側はCueやBPM処理を持たず、WS RelayのRemoteCommandとWebRTC signalingを認証済み接続間で転送するだけです。Controller同士は接続せず、Hostと各Controllerの間に1本ずつPeerConnectionを作ります。どちらのtransportでも`RemoteInputAdapter`以降は同じ既存経路です。
 
 ### Security model
 
 - Networkから`AppAction`を受け取らず、version付き`RemoteCommand`をZodでruntime validation
 - 通常client messageは1 KiBまで。不正JSON、未知version、未知command、範囲外Cueを拒否
+- 1 KiBを超えるmessageは上限内の`rtcOffer`、`rtcAnswer`、`rtcIceCandidate`だけを許可
+- Hostだけがofferを送信し、ControllerのanswerとICEにはserver側のcontrollerSessionIdを付与
+- DataChannelでも1 KiB上限とZod検証を通過したRemoteEnvelopeだけを受理
+- peerごとの未処理ICE candidateを64件までに制限
 - identity、role、controllerSessionId、permissionsは認証済みWebSocket sessionからserver側で決定
 - Host token、QR用joinSecret、短期session ticketを分離。Host tokenはQRへ含めない
 - session ticketはURL queryへ置かずWebSocket subprotocolでUpgrade時だけ送る
@@ -133,6 +140,8 @@ Cloudflare側はCueやBPM処理を持たず、検証済みRemoteCommandをContro
 - 本番CORSとWebSocket Originは`ALLOWED_ORIGINS`完全一致のみ。`*`は使用しない
 
 Room作成APIは公開Frontendから利用するため、Origin制限とRate LimitだけではHost本人認証になりません。自動作成への追加防御が必要な運用では、Cloudflare TurnstileまたはAccessを別途導入してください。
+
+DIRECTはSTUNのみを使用するためNAT環境によって接続できません。接続失敗時はHostとControllerの両方で`WS RELAY`を手動選択してください。WebRTCでは接続相手へICE candidateのネットワーク情報が共有される点にも注意してください。
 
 ### Host permissions
 
@@ -166,12 +175,15 @@ Hostから各Controllerへ1.5秒間隔でpingし、Hostの`performance.now()`だ
 - `src/controller/ControllerCommandSender.ts`
 - `src/controller/ControllerConnection.ts`
 - `src/controller/ControllerCueTracker.ts`
+- `src/controller/WebRtcController.ts`
 - `src/controller/main.ts`
 - `src/controller/style.css`
 - `src/app/remote/RemoteProtocol.ts`
 - `src/app/remote/RemoteInputAdapter.ts`
 - `src/app/remote/RemoteManager.ts`
 - `src/app/remote/WebSocketTransport.ts`
+- `src/app/remote/WebRtcConfig.ts`
+- `src/app/remote/WebRtcHost.ts`
 - `remote-worker/` 以下のWorker、Room、設定、生成型、テスト
 - `.env.example`
 - `tests/RemoteInputAdapter.test.ts`
@@ -183,7 +195,8 @@ Hostから各Controllerへ1.5秒間隔でpingし、Hostの`performance.now()`だ
 
 - `src/app/types.ts`: `InputSource`へ`remote`を追加
 - `src/app/VJApp.ts`: Remoteを既存`AppAction`経路へ接続
-- `src/app/ui/*`、`src/style.css`: Host sessionの明示開始、permissions、QR、RTT UI
+- `src/app/ui/*`、`src/style.css`: Host session、permissions、QR、RTT、接続方式UI
+- `remote-worker/src/protocol.ts`、`remote-worker/src/Room.ts`: 認証済みWebRTC signaling relay
 - `vite.config.ts`: `controller.html`をmulti-page entryへ追加
 - `package.json`、`package-lock.json`: Frontend依存とRemote testを追加
 - `.github/workflows/deploy.yml`: 既存Pages buildへ公開Worker URLだけを渡す
@@ -268,6 +281,9 @@ npm run deploy
 8. Cue hold中にスマホの通信を切るかページを離れ、Hostでholdが解放されることを確認
 9. Hostの一時切断時にHost ticketを再発行して再接続し、Controller切断時はQR再読取表示になることを確認
 10. Worker logでOrigin拒否、Rate limit、予期しないexceptionがないことを確認
+11. HostとControllerで`DIRECT`を選択し、`WebRTC CONNECTED`後に1〜9が動作することを確認
+12. DIRECTでCue hold中にpeerを切断し、Hostでholdが解放されることを確認
+13. DIRECT接続不可時に双方で`WS RELAY`を手動選択し、操作を継続できることを確認
 
 ### Automated verification
 
