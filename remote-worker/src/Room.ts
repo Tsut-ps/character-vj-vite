@@ -2,6 +2,7 @@ import { Server, type Connection, type ConnectionContext, type WSMessage } from 
 import { constantTimeEqual, createSecretToken, hashToken } from "./auth";
 import {
   controllerMessageSchema,
+  DEFAULT_CONNECTION_MODE,
   DEFAULT_PERMISSIONS,
   hostMessageSchema,
   isCommandAllowed,
@@ -16,6 +17,9 @@ import {
   permissionsSchema,
   sequenceIsFresh,
   SESSION_TICKET_TTL_MS,
+  signalingMessageSchema,
+  signalingPayloadWithinLimit,
+  type ConnectionMode,
   type HostMessage,
   type Permissions,
   type RemoteEnvelope,
@@ -40,6 +44,7 @@ type RoomRow = {
   join_open: number;
   join_secret_hash: string | null;
   permissions_json: string;
+  connection_mode: string;
   current_host_connection_id: string | null;
   expires_at: number;
 } & Record<string, SqlStorageValue>;
@@ -106,9 +111,10 @@ export class Room extends Server<Env> {
     const existing = this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM room_state").one().count;
     if (existing > 0) return false;
     this.ctx.storage.sql.exec(
-      "INSERT INTO room_state (singleton, host_token_hash, join_open, join_secret_hash, permissions_json, current_host_connection_id, created_at, expires_at) VALUES (1, ?, 0, NULL, ?, NULL, ?, ?)",
+      "INSERT INTO room_state (singleton, host_token_hash, join_open, join_secret_hash, permissions_json, connection_mode, current_host_connection_id, created_at, expires_at) VALUES (1, ?, 0, NULL, ?, ?, NULL, ?, ?)",
       hostTokenHash,
       JSON.stringify(DEFAULT_PERMISSIONS),
+      DEFAULT_CONNECTION_MODE,
       now,
       roomExpiresAt,
     );
@@ -258,6 +264,7 @@ export class Room extends Server<Env> {
       roomId: this.name,
       ...(controllerSessionId ? { controllerSessionId } : {}),
       permissions,
+      connectionMode: this.currentConnectionMode(),
     });
     if (role === "host") this.sendState(connection);
   }
@@ -287,12 +294,16 @@ export class Room extends Server<Env> {
     }
     const text = this.messageText(message);
     if (text === null) {
-      if (controllerRateAllowed) this.sendError(connection, "invalid_payload", "Message must be UTF-8 JSON under 1 KiB");
+      if (controllerRateAllowed) this.sendError(connection, "invalid_payload", "Message must be bounded UTF-8 JSON");
       return;
     }
     const candidate = parseJsonCandidate(text);
     if (candidate === null) {
       if (controllerRateAllowed) this.sendError(connection, "malformed_json", "Malformed JSON");
+      return;
+    }
+    if (!payloadWithinLimit(text) && !signalingMessageSchema.safeParse(candidate).success) {
+      if (controllerRateAllowed) this.sendError(connection, "invalid_payload", "Message exceeds allowed size");
       return;
     }
     if (state.role === "host") await this.handleHostMessage(connection, candidate);
@@ -417,7 +428,7 @@ export class Room extends Server<Env> {
       return;
     }
     const message = result.data;
-    if (message.type === "openJoin" || message.type === "closeJoin" || message.type === "setPermissions" || message.type === "requestState") {
+    if (message.type === "openJoin" || message.type === "closeJoin" || message.type === "setPermissions" || message.type === "setConnectionMode" || message.type === "requestState") {
       const rate = checkCommandRate(this.hostControlRate, Date.now(), MAX_HOST_CONTROL_MESSAGES_PER_MINUTE, 60_000);
       this.hostControlRate = rate.state;
       if (!rate.allowed) {
@@ -428,12 +439,15 @@ export class Room extends Server<Env> {
     if (message.type === "openJoin") await this.openJoin(connection, message.requestId);
     else if (message.type === "closeJoin") this.closeJoin(connection, message.requestId);
     else if (message.type === "setPermissions") this.setPermissions(connection, message);
+    else if (message.type === "setConnectionMode") this.setConnectionMode(connection, message);
     else if (message.type === "requestState") {
       this.sendAck(connection, message.requestId, message.type, true);
       this.sendState(connection);
+    } else if (message.type === "rtcOffer" || message.type === "rtcIceCandidate") {
+      this.sendToController(message.controllerSessionId, message);
     } else if (message.type === "ping") {
       this.sendToController(message.controllerSessionId, { v: 1, type: "ping", nonce: message.nonce });
-    } else {
+    } else if (message.type === "latency") {
       this.sendToController(message.controllerSessionId, { v: 1, type: "latency", rttMs: message.rttMs });
     }
   }
@@ -454,6 +468,18 @@ export class Room extends Server<Env> {
       connection.close(4002, "Controller reconnected");
       return;
     }
+    if ("type" in result.data && result.data.type === "rtcAnswer") {
+      if (controllerRateAllowed) {
+        this.sendToHosts({ ...result.data, controllerSessionId: state.controllerSessionId });
+      }
+      return;
+    }
+    if ("type" in result.data && result.data.type === "rtcIceCandidate") {
+      if (controllerRateAllowed) {
+        this.sendToHosts({ ...result.data, controllerSessionId: state.controllerSessionId });
+      }
+      return;
+    }
     const roomRate = checkCommandRate(this.roomRate, Date.now(), MAX_ROOM_COMMANDS_PER_SECOND);
     this.roomRate = roomRate.state;
     if ("type" in result.data && result.data.type === "pong") {
@@ -462,7 +488,7 @@ export class Room extends Server<Env> {
       }
       return;
     }
-    const envelope = result.data as RemoteEnvelope;
+    const envelope = result.data;
     if (!sequenceIsFresh(envelope.seq, state.lastSeq)) return;
 
     const cueUpForKnownDown = envelope.command.type === "cue"
@@ -509,6 +535,16 @@ export class Room extends Server<Env> {
     this.sendState(connection);
   }
 
+  /** Hostが選んだ接続modeを永続化し全Controllerへ配布する */
+  private setConnectionMode(connection: Connection<RemoteConnectionState>, message: Extract<HostMessage, { type: "setConnectionMode" }>): void {
+    this.ctx.storage.sql.exec("UPDATE room_state SET connection_mode = ? WHERE singleton = 1", message.mode);
+    for (const controller of this.getConnections<RemoteConnectionState>("role:controller")) {
+      this.send(controller, { v: 1, type: "connectionMode", mode: message.mode });
+    }
+    this.sendAck(connection, message.requestId, message.type, true);
+    this.sendState(connection);
+  }
+
   /** cue down集合をmessage順に更新してrate超過時のup解放を判定可能にする */
   private nextDownCues(current: readonly number[], envelope: RemoteEnvelope): number[] {
     if (envelope.command.type !== "cue") return [...current];
@@ -530,6 +566,7 @@ export class Room extends Server<Env> {
       type: "state",
       joinOpen: room.join_open === 1,
       permissions: this.parsePermissions(room.permissions_json),
+      connectionMode: this.parseConnectionMode(room.connection_mode),
       controllers: [...new Set(controllers)].map((controllerSessionId) => ({ controllerSessionId })),
     });
   }
@@ -538,7 +575,7 @@ export class Room extends Server<Env> {
   private sendAck(
     connection: Connection,
     requestId: string,
-    action: "openJoin" | "closeJoin" | "setPermissions" | "requestState",
+    action: "openJoin" | "closeJoin" | "setPermissions" | "setConnectionMode" | "requestState",
     ok: boolean,
     joinSecret?: string,
   ): void {
@@ -569,10 +606,10 @@ export class Room extends Server<Env> {
     this.send(connection, { v: 1, type: "error", code, message });
   }
 
-  /** binaryと1 KiB超過messageをJSON parse前に拒否する */
+  /** binaryとsignaling上限超過messageをJSON parse前に拒否する */
   private messageText(message: WSMessage): string | null {
     if (typeof message !== "string") return null;
-    return payloadWithinLimit(message) ? message : null;
+    return signalingPayloadWithinLimit(message) ? message : null;
   }
 
   /** room stateの現在permissionsを安全な初期値付きで取得する */
@@ -590,6 +627,17 @@ export class Room extends Server<Env> {
     } catch {
       return { ...DEFAULT_PERMISSIONS };
     }
+  }
+
+  /** 永続値を許可済みconnection modeへ検証する */
+  private parseConnectionMode(value: string): ConnectionMode {
+    return value === "auto" || value === "direct" || value === "turn" || value === "ws" ? value : DEFAULT_CONNECTION_MODE;
+  }
+
+  /** 現在Roomのconnection modeを返す */
+  private currentConnectionMode(): ConnectionMode {
+    const room = this.getRoom();
+    return room ? this.parseConnectionMode(room.connection_mode) : DEFAULT_CONNECTION_MODE;
   }
 
   /** 現在のalarmより早いsession期限だけを登録する */
@@ -625,7 +673,7 @@ export class Room extends Server<Env> {
   /** singleton room rowを取得する */
   private getRoom(): RoomRow | undefined {
     return this.ctx.storage.sql.exec<RoomRow>(
-      "SELECT host_token_hash, join_open, join_secret_hash, permissions_json, current_host_connection_id, expires_at FROM room_state WHERE singleton = 1",
+      "SELECT host_token_hash, join_open, join_secret_hash, permissions_json, connection_mode, current_host_connection_id, expires_at FROM room_state WHERE singleton = 1",
     ).toArray()[0];
   }
 
@@ -639,6 +687,7 @@ export class Room extends Server<Env> {
         join_open INTEGER NOT NULL DEFAULT 0,
         join_secret_hash TEXT,
         permissions_json TEXT NOT NULL,
+        connection_mode TEXT NOT NULL DEFAULT 'auto',
         current_host_connection_id TEXT,
         created_at INTEGER NOT NULL,
         expires_at INTEGER NOT NULL DEFAULT 0
@@ -676,6 +725,13 @@ export class Room extends Server<Env> {
         );
       }
       this.ctx.storage.sql.exec("INSERT INTO _sql_schema_migrations (id) VALUES (1)");
+    }
+    if (schemaVersion < 2) {
+      const modeColumn = this.ctx.storage.sql.exec<{ name: string }>("PRAGMA table_info(room_state)")
+        .toArray()
+        .some((column) => column.name === "connection_mode");
+      if (!modeColumn) this.ctx.storage.sql.exec("ALTER TABLE room_state ADD COLUMN connection_mode TEXT NOT NULL DEFAULT 'auto'");
+      this.ctx.storage.sql.exec("INSERT OR IGNORE INTO _sql_schema_migrations (id) VALUES (2)");
     }
     this.schemaReady = true;
   }

@@ -3,6 +3,8 @@ import test from "node:test";
 import { RemoteInputAdapter } from "../src/app/remote/RemoteInputAdapter.ts";
 import { RemoteManager } from "../src/app/remote/RemoteManager.ts";
 import type { RemoteTransport, WebSocketTransportOptions } from "../src/app/remote/WebSocketTransport.ts";
+import type { RemoteConnectionMode, RemoteEnvelope, RemoteIceServers, RemotePath, ServerMessage } from "../src/app/remote/RemoteProtocol.ts";
+import type { RemoteWebRtcHost, WebRtcHostEvents } from "../src/app/remote/WebRtcHost.ts";
 import type { AppAction } from "../src/app/types.ts";
 import type { RemoteHostElements } from "../src/app/ui/createVjUi.ts";
 
@@ -20,6 +22,7 @@ class FakeElement extends EventTarget {
   checked = false;
   title = "";
   src = "";
+  readonly classList = { toggle: () => false };
 
   /** test対象がQR srcを破棄した状態を再現する */
   removeAttribute(name: string): void {
@@ -28,6 +31,9 @@ class FakeElement extends EventTarget {
 
   /** controller一覧のDOM更新を副作用なしで受け取る */
   replaceChildren(..._nodes: unknown[]): void {}
+
+  /** test対象のARIA更新を副作用なしで受け取る */
+  setAttribute(_name: string, _value: string): void {}
 }
 
 class FakeTransport implements RemoteTransport {
@@ -69,6 +75,42 @@ class FakeTransport implements RemoteTransport {
   }
 }
 
+class FakeWebRtcHost implements RemoteWebRtcHost {
+  readonly events: WebRtcHostEvents;
+  mode: RemoteConnectionMode = "ws";
+  iceServers: RemoteIceServers = [];
+
+  constructor(events: WebRtcHostEvents) {
+    this.events = events;
+  }
+
+  setMode(mode: RemoteConnectionMode, _controllerSessionIds: Iterable<string>, iceServers: RemoteIceServers = []): void {
+    this.mode = mode;
+    this.iceServers = iceServers;
+  }
+
+  controllerConnected(_controllerSessionId: string): void {}
+  controllerDisconnected(_controllerSessionId: string): void {}
+  async handleAnswer(_message: Extract<ServerMessage, { type: "rtcAnswer" }>): Promise<void> {}
+  async handleCandidate(_message: Extract<ServerMessage, { type: "rtcIceCandidate" }>): Promise<void> {}
+
+  receive(controllerSessionId: string, envelope: RemoteEnvelope): void {
+    this.events.onEnvelope(controllerSessionId, envelope);
+  }
+
+  state(controllerSessionId: string, connected: boolean, path: RemotePath = "DIRECT"): void {
+    this.events.onState(controllerSessionId, connected, path);
+  }
+
+  latency(controllerSessionId: string, rttMs: number): void {
+    this.events.onLatency(controllerSessionId, rttMs);
+  }
+
+  destroy(): void {
+    this.mode = "ws";
+  }
+}
+
 interface ManagerHarness {
   manager: RemoteManager;
   ui: RemoteHostElements;
@@ -76,6 +118,7 @@ interface ManagerHarness {
   actions: AppAction[];
   fetchCalls: Array<{ url: string; init?: RequestInit }>;
   qrValues: string[];
+  webRtc: FakeWebRtcHost;
 }
 
 /** EventTarget互換の最小HTMLElement test doubleを返す */
@@ -93,6 +136,13 @@ function createRemoteUi(): RemoteHostElements {
     join: fakeElement<HTMLElement>(),
     startButton: fakeElement<HTMLButtonElement>(),
     showQrButton: fakeElement<HTMLButtonElement>(),
+    autoButton: fakeElement<HTMLButtonElement>(),
+    wsButton: fakeElement<HTMLButtonElement>(),
+    directButton: fakeElement<HTMLButtonElement>(),
+    turnButton: fakeElement<HTMLButtonElement>(),
+    webRtcStatus: fakeElement<HTMLElement>(),
+    transport: fakeElement<HTMLElement>(),
+    path: fakeElement<HTMLElement>(),
     permissionInputs: {
       cue: fakeElement<HTMLInputElement>(),
       tapSync: fakeElement<HTMLInputElement>(),
@@ -124,6 +174,7 @@ function createHarness(): ManagerHarness {
   const actions: AppAction[] = [];
   const fetchCalls: Array<{ url: string; init?: RequestInit }> = [];
   const qrValues: string[] = [];
+  let webRtc: FakeWebRtcHost | null = null;
   const expiresAt = Date.now() + 60_000;
   const fetchStub: typeof fetch = async (input, init) => {
     const url = input instanceof Request ? input.url : String(input);
@@ -133,6 +184,15 @@ function createHarness(): ManagerHarness {
     }
     if (new URL(url).pathname === `/v1/rooms/${ROOM_ID}/host-ticket`) {
       return Response.json({ v: 1, roomId: ROOM_ID, sessionTicket: SECOND_TICKET, expiresAt });
+    }
+    if (new URL(url).pathname === `/v1/rooms/${ROOM_ID}/ice-servers`) {
+      return Response.json({
+        v: 1,
+        iceServers: [
+          { urls: ["stun:stun.cloudflare.com:3478"] },
+          { urls: ["turn:turn.cloudflare.com:3478?transport=udp"], username: "u", credential: "c" },
+        ],
+      });
     }
     return Response.json({ error: "not_found" }, { status: 404 });
   };
@@ -154,9 +214,14 @@ function createHarness(): ManagerHarness {
         return "data:image/png;base64,test";
       },
       controllerUrl: () => new URL("https://user.github.io/repository/controller.html"),
+      webRtcFactory: (events) => {
+        webRtc = new FakeWebRtcHost(events);
+        return webRtc;
+      },
     },
   );
-  return { manager, ui, transports, actions, fetchCalls, qrValues };
+  if (!webRtc) throw new Error("Fake WebRTC host was not created");
+  return { manager, ui, transports, actions, fetchCalls, qrValues, webRtc };
 }
 
 /** START REMOTEを完了してready済みtransportを返す */
@@ -170,6 +235,7 @@ async function startRemote(harness: ManagerHarness): Promise<FakeTransport> {
     role: "host",
     roomId: ROOM_ID,
     permissions: { cue: true, tapSync: false, record: false, clear: false },
+    connectionMode: "ws",
   });
   await waitFor(() => harness.ui.status.textContent === "ONLINE");
   return transport;
@@ -210,7 +276,7 @@ test("Host切断時はmemory上のtokenからticketを再発行する", async ()
   first.disconnect();
   await waitFor(() => harness.transports.length === 2);
   const reconnectCall = harness.fetchCalls.find((call) => call.url.endsWith(`/v1/rooms/${ROOM_ID}/host-ticket`));
-  assert.ok(reconnectCall);
+  if (!reconnectCall) throw new Error("Host ticket refresh was not requested");
   assert.deepEqual(JSON.parse(String(reconnectCall.init?.body)), { hostToken: HOST_TOKEN });
   assert.equal(harness.transports[1].options.sessionTicket, SECOND_TICKET);
   assert.equal(harness.transports[1].options.autoReconnect, false);
@@ -233,5 +299,36 @@ test("replay Remoteを二重発火せずdisconnect時にCueを解放する", asy
     harness.actions.map((action) => action.type === "cue" ? [action.cue, action.phase] : null),
     [[2, "down"], [2, "up"]],
   );
+  harness.manager.destroy();
+});
+
+test("DIRECT peer切断時にControllerのdown中Cueを解放する", async () => {
+  const harness = createHarness();
+  const transport = await startRemote(harness);
+  harness.ui.directButton.dispatchEvent(new Event("click"));
+  await waitFor(() => transport.sent.some((message) => typeof message === "object" && message !== null && "type" in message && message.type === "setConnectionMode"));
+  const request = lastMessage(transport, "setConnectionMode");
+  transport.receive({ v: 1, type: "hostAck", requestId: request.requestId, action: "setConnectionMode", ok: true });
+  await waitFor(() => harness.webRtc.mode === "direct");
+  harness.webRtc.receive(CONTROLLER_ID, { v: 1, seq: 0, command: { type: "cue", cue: 4, state: "down" } });
+  harness.webRtc.state(CONTROLLER_ID, true, "DIRECT");
+  harness.webRtc.state(CONTROLLER_ID, false, "DIRECT");
+  harness.manager.destroy();
+  assert.deepEqual(
+    harness.actions.map((action) => action.type === "cue" ? [action.cue, action.phase] : null),
+    [[3, "down"], [3, "up"]],
+  );
+});
+
+test("TURN modeは短期ICE credentialを取得してWebRTCへ渡す", async () => {
+  const harness = createHarness();
+  const transport = await startRemote(harness);
+  harness.ui.turnButton.dispatchEvent(new Event("click"));
+  await waitFor(() => transport.sent.some((message) => typeof message === "object" && message !== null && "type" in message && message.type === "setConnectionMode"));
+  const request = lastMessage(transport, "setConnectionMode");
+  transport.receive({ v: 1, type: "hostAck", requestId: request.requestId, action: "setConnectionMode", ok: true });
+  await waitFor(() => harness.webRtc.mode === "turn");
+  assert.ok(harness.fetchCalls.some((call) => call.url.endsWith(`/v1/rooms/${ROOM_ID}/ice-servers`)));
+  assert.ok(harness.webRtc.iceServers.some((server: { urls: string | string[] }) => String(server.urls).includes("turn:")));
   harness.manager.destroy();
 });

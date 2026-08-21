@@ -5,6 +5,8 @@ import {
   isCommandAllowed,
   parseJsonCandidate,
   payloadWithinLimit,
+  signalingMessageSchema,
+  signalingPayloadWithinLimit,
   sequenceIsFresh,
   SESSION_TICKET_TTL_MS,
 } from "../src/protocol";
@@ -26,10 +28,30 @@ describe("remote protocol security", () => {
     expect(hostMessageSchema.safeParse({ v: 1, type: "openJoin", requestId }).success).toBe(true);
   });
 
+  it("WebRTC signalingのrole方向とidentityを固定する", () => {
+    const controllerSessionId = crypto.randomUUID();
+    const rtcSessionId = crypto.randomUUID();
+    const candidate = { candidate: "candidate:1", sdpMid: "0", sdpMLineIndex: 0, usernameFragment: null };
+    expect(hostMessageSchema.safeParse({ v: 1, type: "rtcOffer", controllerSessionId, rtcSessionId, sdp: "v=0" }).success).toBe(true);
+    expect(controllerMessageSchema.safeParse({ v: 1, type: "rtcOffer", controllerSessionId, rtcSessionId, sdp: "v=0" }).success).toBe(false);
+    expect(controllerMessageSchema.safeParse({ v: 1, type: "rtcAnswer", rtcSessionId, sdp: "v=0" }).success).toBe(true);
+    expect(hostMessageSchema.safeParse({ v: 1, type: "rtcAnswer", controllerSessionId, rtcSessionId, sdp: "v=0" }).success).toBe(false);
+    expect(controllerMessageSchema.safeParse({ v: 1, type: "rtcIceCandidate", rtcSessionId, candidate }).success).toBe(true);
+    expect(controllerMessageSchema.safeParse({ v: 1, type: "rtcIceCandidate", controllerSessionId, rtcSessionId, candidate }).success).toBe(false);
+  });
+
   it("malformed JSONとoversized payloadを拒否する", () => {
     expect(parseJsonCandidate("{")).toBeNull();
     expect(payloadWithinLimit(JSON.stringify({ v: 1, seq: 1, command: { type: "tap" } }))).toBe(true);
     expect(payloadWithinLimit("x".repeat(1025))).toBe(false);
+  });
+
+  it("1 KiB超過は検証済みsignalingだけ許可する", () => {
+    const signaling = JSON.stringify({ v: 1, type: "rtcAnswer", rtcSessionId: crypto.randomUUID(), sdp: `v=0${"a".repeat(2_000)}` });
+    expect(payloadWithinLimit(signaling)).toBe(false);
+    expect(signalingPayloadWithinLimit(signaling)).toBe(true);
+    expect(signalingMessageSchema.safeParse(JSON.parse(signaling)).success).toBe(true);
+    expect(signalingPayloadWithinLimit("x".repeat(24 * 1024 + 1))).toBe(false);
   });
 
   it("unknown command、unknown version、cue範囲外を拒否する", () => {

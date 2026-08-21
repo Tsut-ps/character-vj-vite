@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   isTerminalControllerClose,
+  parseRemoteEnvelopeMessage,
+  parseServerMessage,
   REMOTE_INITIAL_CONNECT_MAX_MS,
   REMOTE_SESSION_MAX_MS,
   remoteInitialConnectTimeoutMs,
@@ -14,6 +16,20 @@ test("二重接続と期限切れのclose codeでは再接続を止める", () =
   assert.equal(isTerminalControllerClose(4401), true);
   assert.equal(isTerminalControllerClose(4429), true);
   assert.equal(isTerminalControllerClose(1006), false);
+});
+
+test("DataChannelでは検証済みRemoteEnvelopeだけを受け付ける", () => {
+  const valid = JSON.stringify({ v: 1, seq: 3, command: { type: "cue", cue: 9, state: "down" } });
+  assert.equal(parseRemoteEnvelopeMessage(valid)?.seq, 3);
+  assert.equal(parseRemoteEnvelopeMessage(JSON.stringify({ v: 1, seq: 3, command: { type: "cue", cue: 10, state: "down" } })), null);
+  assert.equal(parseRemoteEnvelopeMessage("x".repeat(1025)), null);
+});
+
+test("server signalingはcontroller identity付きschemaだけを受け付ける", () => {
+  const controllerSessionId = crypto.randomUUID();
+  const rtcSessionId = crypto.randomUUID();
+  assert.equal(parseServerMessage(JSON.stringify({ v: 1, type: "rtcOffer", controllerSessionId, rtcSessionId, sdp: "v=0" }))?.type, "rtcOffer");
+  assert.equal(parseServerMessage(JSON.stringify({ v: 1, type: "rtcAnswer", rtcSessionId, sdp: "v=0" })), null);
 });
 
 test("client時計が遅れていても再接続を1時間で止める", () => {

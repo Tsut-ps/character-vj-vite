@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export const PROTOCOL_VERSION = 1 as const;
 export const MAX_CLIENT_MESSAGE_BYTES = 1024;
+export const MAX_SIGNALING_MESSAGE_BYTES = 24 * 1024;
 export const SESSION_TICKET_TTL_MS = 60 * 60 * 1000;
 export const PENDING_CONTROLLER_TICKET_TTL_MS = 60 * 1000;
 export const MAX_CONTROLLER_SESSIONS = 200;
@@ -31,6 +32,10 @@ export const DEFAULT_PERMISSIONS: Permissions = {
   clear: false,
 };
 
+export const connectionModeSchema = z.enum(["auto", "direct", "turn", "ws"]);
+export type ConnectionMode = z.infer<typeof connectionModeSchema>;
+export const DEFAULT_CONNECTION_MODE: ConnectionMode = "auto";
+
 export const remoteCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("cue"), cue: cueSchema, state: z.enum(["down", "up"]), latch: z.boolean().optional() }).strict(),
   z.object({ type: z.literal("tap") }).strict(),
@@ -48,16 +53,57 @@ export const remoteEnvelopeSchema = z.object({
 export type RemoteCommand = z.infer<typeof remoteCommandSchema>;
 export type RemoteEnvelope = z.infer<typeof remoteEnvelopeSchema>;
 
+const rtcSdpSchema = z.string().min(1).max(20_000);
+const rtcSessionIdSchema = z.string().uuid();
+export const rtcIceCandidateSchema = z.object({
+  candidate: z.string().max(4_096),
+  sdpMid: z.string().max(256).nullable().optional(),
+  sdpMLineIndex: z.number().int().nonnegative().max(65_535).nullable().optional(),
+  usernameFragment: z.string().max(256).nullable().optional(),
+}).strict();
+
+const controllerRtcAnswerSchema = z.object({
+  v: z.literal(1),
+  type: z.literal("rtcAnswer"),
+  rtcSessionId: rtcSessionIdSchema,
+  sdp: rtcSdpSchema,
+}).strict();
+const controllerRtcCandidateSchema = z.object({
+  v: z.literal(1),
+  type: z.literal("rtcIceCandidate"),
+  rtcSessionId: rtcSessionIdSchema,
+  candidate: rtcIceCandidateSchema,
+}).strict();
+const hostRtcOfferSchema = z.object({
+  v: z.literal(1),
+  type: z.literal("rtcOffer"),
+  controllerSessionId: z.string().uuid(),
+  rtcSessionId: rtcSessionIdSchema,
+  sdp: rtcSdpSchema,
+}).strict();
+const hostRtcCandidateSchema = z.object({
+  v: z.literal(1),
+  type: z.literal("rtcIceCandidate"),
+  controllerSessionId: z.string().uuid(),
+  rtcSessionId: rtcSessionIdSchema,
+  candidate: rtcIceCandidateSchema,
+}).strict();
+
 export const controllerMessageSchema = z.union([
   remoteEnvelopeSchema,
   z.object({ v: z.literal(1), type: z.literal("pong"), nonce: z.string().uuid() }).strict(),
+  controllerRtcAnswerSchema,
+  controllerRtcCandidateSchema,
 ]);
 
 export const hostMessageSchema = z.discriminatedUnion("type", [
   z.object({ v: z.literal(1), type: z.literal("openJoin"), requestId: z.string().uuid() }).strict(),
   z.object({ v: z.literal(1), type: z.literal("closeJoin"), requestId: z.string().uuid() }).strict(),
   z.object({ v: z.literal(1), type: z.literal("setPermissions"), requestId: z.string().uuid(), permissions: permissionsSchema }).strict(),
+  z.object({ v: z.literal(1), type: z.literal("setConnectionMode"), requestId: z.string().uuid(), mode: connectionModeSchema }).strict(),
   z.object({ v: z.literal(1), type: z.literal("requestState"), requestId: z.string().uuid() }).strict(),
+  hostRtcOfferSchema,
+  hostRtcCandidateSchema,
   z.object({ v: z.literal(1), type: z.literal("ping"), controllerSessionId: z.string().uuid(), nonce: z.string().uuid() }).strict(),
   z.object({
     v: z.literal(1),
@@ -69,30 +115,33 @@ export const hostMessageSchema = z.discriminatedUnion("type", [
 
 export type HostMessage = z.infer<typeof hostMessageSchema>;
 
+export const signalingMessageSchema = z.union([
+  controllerRtcAnswerSchema,
+  controllerRtcCandidateSchema,
+  hostRtcOfferSchema,
+  hostRtcCandidateSchema,
+]);
+
 export const joinRequestSchema = z.object({ joinSecret: z.string().min(32).max(256) }).strict();
 export const hostTicketRequestSchema = z.object({ hostToken: z.string().min(32).max(256) }).strict();
 export const roomIdSchema = z.string().uuid();
 
-/** JSON parse失敗をexceptionとしてmessage handler外へ漏らさない */
 export function parseJsonCandidate(text: string): unknown | null {
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return null;
-  }
+  try { return JSON.parse(text) as unknown; } catch { return null; }
 }
 
-/** 通常client messageが1 KiB以内かUTF-8 byte数で判定する */
 export function payloadWithinLimit(text: string): boolean {
   return new TextEncoder().encode(text).byteLength <= MAX_CLIENT_MESSAGE_BYTES;
 }
 
-/** session内で単調増加するseqだけを新規入力として認める */
+export function signalingPayloadWithinLimit(text: string): boolean {
+  return new TextEncoder().encode(text).byteLength <= MAX_SIGNALING_MESSAGE_BYTES;
+}
+
 export function sequenceIsFresh(seq: number, lastSeq: number): boolean {
   return Number.isSafeInteger(seq) && seq >= 0 && seq > lastSeq;
 }
 
-/** commandが現在の観客権限に含まれるか判定する */
 export function isCommandAllowed(command: RemoteCommand, permissions: Permissions): boolean {
   switch (command.type) {
     case "cue": return permissions.cue;
@@ -101,4 +150,5 @@ export function isCommandAllowed(command: RemoteCommand, permissions: Permission
     case "record": return permissions.record;
     case "clear": return permissions.clear;
   }
+  return false;
 }
