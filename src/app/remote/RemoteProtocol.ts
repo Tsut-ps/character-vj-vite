@@ -143,6 +143,13 @@ export const createRoomResponseSchema = z.object({
   expiresAt: z.number().int().positive(),
 }).strict();
 
+export const hostTicketResponseSchema = z.object({
+  v: z.literal(1),
+  roomId: z.string().uuid(),
+  sessionTicket: z.string().min(32).max(256),
+  expiresAt: z.number().int().positive(),
+}).strict();
+
 export const joinRoomResponseSchema = z.object({
   v: z.literal(1),
   roomId: z.string().uuid(),

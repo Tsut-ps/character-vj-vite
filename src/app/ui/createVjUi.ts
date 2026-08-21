@@ -10,6 +10,8 @@ import {
 export interface RemoteHostElements {
   status: HTMLElement;
   count: HTMLElement;
+  join: HTMLElement;
+  startButton: HTMLButtonElement;
   showQrButton: HTMLButtonElement;
   permissionInputs: Record<"cue" | "tapSync" | "record" | "clear", HTMLInputElement>;
   stats: HTMLElement;
@@ -139,6 +141,8 @@ export function createVjUi(host: HTMLElement): VjUiElements {
     remote: {
       status: queryRequired<HTMLElement>(panel, "[data-remote-status]"),
       count: queryRequired<HTMLElement>(panel, "[data-remote-count]"),
+      join: queryRequired<HTMLElement>(panel, "[data-remote-join]"),
+      startButton: queryRequired<HTMLButtonElement>(panel, "[data-action=start-remote]"),
       showQrButton: queryRequired<HTMLButtonElement>(panel, "[data-action=show-qr]"),
       permissionInputs: {
         cue: queryRequired<HTMLInputElement>(panel, "[data-remote-permission=cue]"),

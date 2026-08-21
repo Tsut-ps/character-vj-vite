@@ -55,7 +55,9 @@ export const CONTROL_PANEL_HTML = `
   <section class="remote-controls" aria-label="Remote controller settings">
     <div class="remote-head"><strong>REMOTE</strong><span data-remote-status>OFFLINE</span></div>
     <div class="remote-count">Controllers: <b data-remote-count>0</b></div>
-    <button data-action="show-qr" class="remote-show">SHOW QR</button>
+    <div class="remote-count">Join: <b data-remote-join>CLOSED</b></div>
+    <button data-action="start-remote" class="remote-start">START REMOTE</button>
+    <button data-action="show-qr" class="remote-show" disabled>SHOW QR</button>
     <fieldset>
       <legend>AUDIENCE ALLOW</legend>
       <label><input data-remote-permission="cue" type="checkbox" checked> CUE 1–9</label>

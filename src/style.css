@@ -9,7 +9,8 @@
 .remote-head, .remote-count { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .remote-head span { color: #7fe6ff; font-size: 10px; letter-spacing: .08em; }
 .remote-count { margin: 6px 0; font-size: 11px; }
-.remote-show { width: 100%; min-height: 32px; border-color: #55d8ff !important; color: #a9edff !important; }
+.remote-start, .remote-show { width: 100%; min-height: 32px; border-color: #55d8ff !important; color: #a9edff !important; }
+.remote-show { margin-top: 5px; }
 .remote-controls fieldset { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px; margin: 8px 0; padding: 7px; border: 1px solid rgba(255,255,255,.15); }
 .remote-controls legend { padding: 0 4px; font-size: 9px; color: rgba(255,255,255,.65); }
 .remote-controls label { font-size: 9px; white-space: nowrap; }

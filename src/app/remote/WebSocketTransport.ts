@@ -1,5 +1,5 @@
 import PartySocket from "partysocket";
-import { REMOTE_TICKET_PROTOCOL_PREFIX } from "./RemoteProtocol";
+import { REMOTE_TICKET_PROTOCOL_PREFIX } from "./RemoteProtocol.ts";
 
 export interface RemoteTransportEvents {
   /** WebSocket OPENを通知する */
@@ -22,12 +22,15 @@ export interface RemoteTransport {
   close(): void;
 }
 
-interface WebSocketTransportOptions {
+export interface WebSocketTransportOptions {
   baseUrl: string;
   roomId: string;
   sessionTicket: string;
+  autoReconnect?: boolean;
   events: RemoteTransportEvents;
 }
+
+export type RemoteTransportFactory = (options: WebSocketTransportOptions) => RemoteTransport;
 
 /** 将来差し替え可能なstale送信を保持しないPartySocket transport */
 export class WebSocketTransport implements RemoteTransport {
@@ -50,6 +53,7 @@ export class WebSocketTransport implements RemoteTransport {
       minReconnectionDelay: 600,
       maxReconnectionDelay: 5_000,
       connectionTimeout: 5_000,
+      maxRetries: options.autoReconnect === false ? 0 : undefined,
     });
     this.socket.addEventListener("open", () => options.events.onOpen());
     this.socket.addEventListener("close", (event) => options.events.onClose(event));
