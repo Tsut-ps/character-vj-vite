@@ -1,6 +1,4 @@
 import {
-  commandAllowed,
-  DEFAULT_REMOTE_PERMISSIONS,
   isTerminalControllerClose,
   joinRoomResponseSchema,
   parseServerMessage,
@@ -10,6 +8,7 @@ import {
   type RemotePermissions,
 } from "../app/remote/RemoteProtocol";
 import { WebSocketTransport, type RemoteTransport } from "../app/remote/WebSocketTransport";
+import { ControllerCommandSender } from "./ControllerCommandSender";
 
 export interface ControllerConnectionEvents {
   onStatus(status: "joining" | "connecting" | "connected" | "disconnected" | "error", detail?: string): void;
@@ -22,8 +21,7 @@ export class ControllerConnection {
   private readonly baseUrl = import.meta.env.VITE_REMOTE_BASE_URL?.trim() ?? "";
   private readonly events: ControllerConnectionEvents;
   private transport: RemoteTransport | null = null;
-  private permissions: RemotePermissions = { ...DEFAULT_REMOTE_PERMISSIONS };
-  private seq = 0;
+  private readonly commands = new ControllerCommandSender((envelope) => this.transport?.sendRealtime(envelope) ?? false);
   private destroyed = false;
   private expiryTimer: number | null = null;
   private readyTimer: number | null = null;
@@ -42,11 +40,15 @@ export class ControllerConnection {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ joinSecret }),
     });
-    if (!response.ok) throw new Error(response.status === 403 ? "JOIN is closed or this QR has expired" : `JOIN failed (${response.status})`);
+    if (!response.ok) {
+      throw new Error(response.status === 403
+        ? "QR expired, JOIN closed, or room expired"
+        : `JOIN failed (${response.status})`);
+    }
     const parsed = joinRoomResponseSchema.safeParse(await response.json());
     if (!parsed.success || parsed.data.roomId !== roomId) throw new Error("Invalid JOIN response");
-    this.permissions = parsed.data.permissions;
-    this.events.onPermissions(this.permissions);
+    this.commands.setPermissions(parsed.data.permissions);
+    this.events.onPermissions(parsed.data.permissions);
     this.connect(roomId, parsed.data.sessionTicket);
     this.scheduleExpiry(parsed.data.expiresAt);
     this.scheduleReadyDeadline(parsed.data.connectBy);
@@ -54,11 +56,7 @@ export class ControllerConnection {
 
   /** permission確認後にseq付きcommandをbufferなしで送る */
   sendCommand(command: RemoteCommand): boolean {
-    if (!commandAllowed(command, this.permissions) || !this.transport?.isOpen) return false;
-    const envelope = { v: 1 as const, seq: this.seq, command };
-    if (!this.transport.sendRealtime(envelope)) return false;
-    this.seq += 1;
-    return true;
+    return this.commands.send(command);
   }
 
   /** reconnectを止めてconnection資源を解放する */
@@ -79,12 +77,13 @@ export class ControllerConnection {
       baseUrl: this.baseUrl,
       roomId,
       sessionTicket,
+      autoReconnect: false,
       events: {
         onOpen: () => this.events.onStatus("connecting"),
         onClose: (event) => {
           if (this.destroyed) return;
           if (isTerminalControllerClose(event.code)) this.endSession(event.code === 4002 ? "Remote session opened elsewhere" : "Remote session expired");
-          else this.events.onStatus("disconnected");
+          else this.disconnectSession("Re-scan the QR to reconnect");
         },
         onError: () => { if (!this.destroyed) this.events.onStatus("disconnected"); },
         onMessage: (data) => this.handleMessage(data),
@@ -125,6 +124,20 @@ export class ControllerConnection {
     this.events.onStatus("error", detail);
   }
 
+  /** controller再JOINを行わず切断状態で自動再接続を停止する */
+  private disconnectSession(detail: string): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    if (this.expiryTimer !== null) window.clearTimeout(this.expiryTimer);
+    this.expiryTimer = null;
+    if (this.readyTimer !== null) window.clearTimeout(this.readyTimer);
+    this.readyTimer = null;
+    const transport = this.transport;
+    this.transport = null;
+    transport?.close();
+    this.events.onStatus("disconnected", detail);
+  }
+
   /** server messageをZod検証してidentity非依存のUI stateだけへ反映する */
   private handleMessage(data: unknown): void {
     const message = parseServerMessage(data);
@@ -132,11 +145,11 @@ export class ControllerConnection {
     if (message.type === "ready" && message.role === "controller") {
       if (this.readyTimer !== null) window.clearTimeout(this.readyTimer);
       this.readyTimer = null;
-      this.permissions = message.permissions;
+      this.commands.setPermissions(message.permissions);
       this.events.onPermissions(message.permissions);
       this.events.onStatus("connected");
     } else if (message.type === "permissions") {
-      this.permissions = message.permissions;
+      this.commands.setPermissions(message.permissions);
       this.events.onPermissions(message.permissions);
     } else if (message.type === "ping") {
       this.transport?.sendRealtime({ v: 1, type: "pong", nonce: message.nonce });

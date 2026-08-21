@@ -1,6 +1,7 @@
 import type { RemotePermissions } from "../app/remote/RemoteProtocol";
 import { DEFAULT_REMOTE_PERMISSIONS } from "../app/remote/RemoteProtocol";
 import { ControllerConnection } from "./ControllerConnection";
+import { ControllerCueTracker } from "./ControllerCueTracker";
 
 type ControllerStatus = "joining" | "connecting" | "connected" | "disconnected" | "error";
 
@@ -8,7 +9,8 @@ type ControllerStatus = "joining" | "connecting" | "connected" | "disconnected" 
 export class ControllerApp {
   private readonly host: HTMLElement;
   private readonly connection: ControllerConnection;
-  private readonly activePointers = new Map<number, number>();
+  private readonly cueTracker = new ControllerCueTracker();
+  private readonly lifecycleAbort = new AbortController();
   private permissions: RemotePermissions = { ...DEFAULT_REMOTE_PERMISSIONS };
   private status: ControllerStatus = "joining";
 
@@ -43,7 +45,8 @@ export class ControllerApp {
 
   /** reconnectとpointer stateを破棄する */
   destroy(): void {
-    this.releaseLocalPointers();
+    this.releaseHeldCues();
+    this.lifecycleAbort.abort();
     this.connection.destroy();
   }
 
@@ -71,12 +74,13 @@ export class ControllerApp {
 
   /** pointer captureを使いdownと全release eventを対称に接続する */
   private bindControls(): void {
-    this.host.addEventListener("contextmenu", (event) => event.preventDefault());
+    const signal = this.lifecycleAbort.signal;
+    this.host.addEventListener("contextmenu", (event) => event.preventDefault(), { signal });
     for (const button of this.host.querySelectorAll<HTMLButtonElement>("[data-cue]")) {
-      button.addEventListener("pointerdown", (event) => this.onCueDown(event, button));
-      button.addEventListener("pointerup", (event) => this.onCueRelease(event));
-      button.addEventListener("pointercancel", (event) => this.onCueRelease(event));
-      button.addEventListener("lostpointercapture", (event) => this.onCueRelease(event));
+      button.addEventListener("pointerdown", (event) => this.onCueDown(event, button), { signal });
+      button.addEventListener("pointerup", (event) => this.onCueRelease(event), { signal });
+      button.addEventListener("pointercancel", (event) => this.onCueRelease(event), { signal });
+      button.addEventListener("lostpointercapture", (event) => this.onCueRelease(event), { signal });
     }
     for (const button of this.host.querySelectorAll<HTMLButtonElement>("[data-command]")) {
       button.addEventListener("pointerdown", (event) => {
@@ -86,8 +90,13 @@ export class ControllerApp {
         if (type === "tap" || type === "sync" || type === "record" || type === "clear") {
           this.connection.sendCommand({ type });
         }
-      });
+      }, { signal });
     }
+    window.addEventListener("blur", () => this.releaseHeldCues(), { signal });
+    window.addEventListener("pagehide", () => this.releaseHeldCues(), { signal });
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") this.releaseHeldCues();
+    }, { signal });
   }
 
   /** pointerdownをcue downへ変換して送信成功時だけactive表示にする */
@@ -96,7 +105,7 @@ export class ControllerApp {
     const cue = Number(button.dataset.cue);
     if (button.disabled || !Number.isInteger(cue) || cue < 1 || cue > 9) return;
     if (!this.connection.sendCommand({ type: "cue", cue: cue as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9, state: "down" })) return;
-    this.activePointers.set(event.pointerId, cue);
+    this.cueTracker.hold(event.pointerId, cue);
     button.classList.add("active");
     try {
       button.setPointerCapture(event.pointerId);
@@ -107,19 +116,23 @@ export class ControllerApp {
 
   /** pointerup系eventを一度だけcue upへ変換する */
   private onCueRelease(event: PointerEvent): void {
-    const cue = this.activePointers.get(event.pointerId);
-    if (!cue) return;
-    this.activePointers.delete(event.pointerId);
-    const stillHeld = [...this.activePointers.values()].includes(cue);
-    if (!stillHeld) {
-      this.connection.sendCommand({ type: "cue", cue: cue as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9, state: "up" });
-      this.host.querySelector<HTMLButtonElement>(`[data-cue="${cue}"]`)?.classList.remove("active");
-    }
+    const cue = this.cueTracker.release(event.pointerId);
+    if (cue === null) return;
+    this.connection.sendCommand({ type: "cue", cue: cue as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9, state: "up" });
+    this.host.querySelector<HTMLButtonElement>(`[data-cue="${cue}"]`)?.classList.remove("active");
   }
 
   /** connection切断時にstale hold表示をlocalだけで解除する */
   private releaseLocalPointers(): void {
-    this.activePointers.clear();
+    this.cueTracker.releaseAll();
+    for (const button of this.host.querySelectorAll(".cue.active")) button.classList.remove("active");
+  }
+
+  /** ページ離脱前に保持中CueのUpをOPEN中だけ送信する */
+  private releaseHeldCues(): void {
+    for (const cue of this.cueTracker.releaseAll()) {
+      this.connection.sendCommand({ type: "cue", cue: cue as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9, state: "up" });
+    }
     for (const button of this.host.querySelectorAll(".cue.active")) button.classList.remove("active");
   }
 
