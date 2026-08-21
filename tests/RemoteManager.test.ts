@@ -3,6 +3,8 @@ import test from "node:test";
 import { RemoteInputAdapter } from "../src/app/remote/RemoteInputAdapter.ts";
 import { RemoteManager } from "../src/app/remote/RemoteManager.ts";
 import type { RemoteTransport, WebSocketTransportOptions } from "../src/app/remote/WebSocketTransport.ts";
+import type { RemoteEnvelope, ServerMessage } from "../src/app/remote/RemoteProtocol.ts";
+import type { RemoteWebRtcHost, WebRtcHostEvents } from "../src/app/remote/WebRtcHost.ts";
 import type { AppAction } from "../src/app/types.ts";
 import type { RemoteHostElements } from "../src/app/ui/createVjUi.ts";
 
@@ -20,6 +22,7 @@ class FakeElement extends EventTarget {
   checked = false;
   title = "";
   src = "";
+  readonly classList = { toggle: () => false };
 
   /** test対象がQR srcを破棄した状態を再現する */
   removeAttribute(name: string): void {
@@ -28,6 +31,9 @@ class FakeElement extends EventTarget {
 
   /** controller一覧のDOM更新を副作用なしで受け取る */
   replaceChildren(..._nodes: unknown[]): void {}
+
+  /** test対象のARIA更新を副作用なしで受け取る */
+  setAttribute(_name: string, _value: string): void {}
 }
 
 class FakeTransport implements RemoteTransport {
@@ -69,6 +75,48 @@ class FakeTransport implements RemoteTransport {
   }
 }
 
+class FakeWebRtcHost implements RemoteWebRtcHost {
+  readonly events: WebRtcHostEvents;
+  enabled = false;
+
+  /** WebRTC callbackを保持する */
+  constructor(events: WebRtcHostEvents) {
+    this.events = events;
+  }
+
+  /** DIRECT有効状態を記録する */
+  setEnabled(enabled: boolean, _controllerSessionIds: Iterable<string>): void {
+    this.enabled = enabled;
+  }
+
+  /** testではpeer生成を行わない */
+  controllerConnected(_controllerSessionId: string): void {}
+
+  /** testではpeer解放を行わない */
+  controllerDisconnected(_controllerSessionId: string): void {}
+
+  /** testではanswer適用を行わない */
+  async handleAnswer(_message: Extract<ServerMessage, { type: "rtcAnswer" }>): Promise<void> {}
+
+  /** testではcandidate適用を行わない */
+  async handleCandidate(_message: Extract<ServerMessage, { type: "rtcIceCandidate" }>): Promise<void> {}
+
+  /** DIRECT RemoteEnvelope受信を発火する */
+  receive(controllerSessionId: string, envelope: RemoteEnvelope): void {
+    this.events.onEnvelope(controllerSessionId, envelope);
+  }
+
+  /** WebRTC peer状態変化を発火する */
+  state(controllerSessionId: string, connected: boolean): void {
+    this.events.onState(controllerSessionId, connected);
+  }
+
+  /** test WebRTCを無効化する */
+  destroy(): void {
+    this.enabled = false;
+  }
+}
+
 interface ManagerHarness {
   manager: RemoteManager;
   ui: RemoteHostElements;
@@ -76,6 +124,7 @@ interface ManagerHarness {
   actions: AppAction[];
   fetchCalls: Array<{ url: string; init?: RequestInit }>;
   qrValues: string[];
+  webRtc: FakeWebRtcHost;
 }
 
 /** EventTarget互換の最小HTMLElement test doubleを返す */
@@ -93,6 +142,11 @@ function createRemoteUi(): RemoteHostElements {
     join: fakeElement<HTMLElement>(),
     startButton: fakeElement<HTMLButtonElement>(),
     showQrButton: fakeElement<HTMLButtonElement>(),
+    wsButton: fakeElement<HTMLButtonElement>(),
+    directButton: fakeElement<HTMLButtonElement>(),
+    webRtcStatus: fakeElement<HTMLElement>(),
+    transport: fakeElement<HTMLElement>(),
+    path: fakeElement<HTMLElement>(),
     permissionInputs: {
       cue: fakeElement<HTMLInputElement>(),
       tapSync: fakeElement<HTMLInputElement>(),
@@ -124,6 +178,7 @@ function createHarness(): ManagerHarness {
   const actions: AppAction[] = [];
   const fetchCalls: Array<{ url: string; init?: RequestInit }> = [];
   const qrValues: string[] = [];
+  let webRtc: FakeWebRtcHost | null = null;
   const expiresAt = Date.now() + 60_000;
   const fetchStub: typeof fetch = async (input, init) => {
     const url = input instanceof Request ? input.url : String(input);
@@ -154,9 +209,14 @@ function createHarness(): ManagerHarness {
         return "data:image/png;base64,test";
       },
       controllerUrl: () => new URL("https://user.github.io/repository/controller.html"),
+      webRtcFactory: (events) => {
+        webRtc = new FakeWebRtcHost(events);
+        return webRtc;
+      },
     },
   );
-  return { manager, ui, transports, actions, fetchCalls, qrValues };
+  assert.ok(webRtc);
+  return { manager, ui, transports, actions, fetchCalls, qrValues, webRtc };
 }
 
 /** START REMOTEを完了してready済みtransportを返す */
@@ -234,4 +294,19 @@ test("replay Remoteを二重発火せずdisconnect時にCueを解放する", asy
     [[2, "down"], [2, "up"]],
   );
   harness.manager.destroy();
+});
+
+test("DIRECT peer切断時にControllerのdown中Cueを解放する", async () => {
+  const harness = createHarness();
+  await startRemote(harness);
+  harness.ui.directButton.dispatchEvent(new Event("click"));
+  assert.equal(harness.webRtc.enabled, true);
+  harness.webRtc.receive(CONTROLLER_ID, { v: 1, seq: 0, command: { type: "cue", cue: 4, state: "down" } });
+  harness.webRtc.state(CONTROLLER_ID, true);
+  harness.webRtc.state(CONTROLLER_ID, false);
+  harness.manager.destroy();
+  assert.deepEqual(
+    harness.actions.map((action) => action.type === "cue" ? [action.cue, action.phase] : null),
+    [[3, "down"], [3, "up"]],
+  );
 });

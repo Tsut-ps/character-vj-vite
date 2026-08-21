@@ -18,6 +18,12 @@ h1 { margin: 0 0 8px; font-size: clamp(18px, 5vw, 26px); letter-spacing: .03em; 
 .utility-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .utility-grid button, .clear { min-height: 58px; border-radius: 10px; font-weight: 700; }
 .clear { width: 100%; border-color: rgba(255,110,130,.6); background: linear-gradient(#35151d, #1b0b10); }
+.controller-connection { display: grid; gap: 6px; font-size: 11px; }
+.controller-connection > span { color: rgba(255,255,255,.5); }
+.controller-connection > div { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.controller-connection button { min-height: 42px; border-radius: 8px; font-weight: 700; }
+.controller-connection button.selected { border-color: #fff; background: #1685a3; }
+.controller-connection > b { color: #75f0ae; font-size: 11px; }
 .controller-path { margin-top: auto; display: grid; grid-template-columns: 1fr 1fr; gap: 3px 12px; padding: 10px; border: 1px solid rgba(255,255,255,.12); font-size: 11px; }
 .controller-path span { color: rgba(255,255,255,.5); }
 [data-detail] { min-height: 1.4em; margin: 0; text-align: center; color: #ff9cac; font-size: 12px; }

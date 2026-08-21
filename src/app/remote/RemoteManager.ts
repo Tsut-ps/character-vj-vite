@@ -8,6 +8,7 @@ import {
   parseServerMessage,
   remoteSessionTimeoutMs,
   type HostClientMessage,
+  type RemoteConnectionMode,
   type RemotePermissions,
   type ServerMessage,
 } from "./RemoteProtocol.ts";
@@ -17,6 +18,7 @@ import {
   type RemoteTransportFactory,
   type WebSocketTransportOptions,
 } from "./WebSocketTransport.ts";
+import { WebRtcHost, type RemoteWebRtcHost, type WebRtcHostEvents, type WebRtcHostFactory } from "./WebRtcHost.ts";
 
 interface PendingRequest {
   resolve: (message: Extract<ServerMessage, { type: "hostAck" }>) => void;
@@ -36,6 +38,7 @@ export interface RemoteManagerDependencies {
   transportFactory?: RemoteTransportFactory;
   createQr?: (value: string) => Promise<string>;
   controllerUrl?: () => URL;
+  webRtcFactory?: WebRtcHostFactory;
 }
 
 /** Host remote session、QR、権限、RTTを管理し操作はadapterへだけ渡す */
@@ -48,7 +51,9 @@ export class RemoteManager {
   private readonly transportFactory: RemoteTransportFactory;
   private readonly createQr: (value: string) => Promise<string>;
   private readonly controllerUrl: () => URL;
+  private readonly webRtc: RemoteWebRtcHost;
   private permissions: RemotePermissions = { ...DEFAULT_REMOTE_PERMISSIONS };
+  private connectionMode: RemoteConnectionMode = "ws";
   private session: { roomId: string; hostToken: string; expiresAt: number } | null = null;
   private transport: RemoteTransport | null = null;
   private ready = false;
@@ -57,6 +62,7 @@ export class RemoteManager {
   private destroyed = false;
   private readonly controllers = new Set<string>();
   private readonly rttByController = new Map<string, number>();
+  private readonly webRtcByController = new Map<string, boolean>();
   private readonly pendingPings = new Map<string, { controllerSessionId: string; sentAt: number }>();
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly readyWaiters = new Set<ReadyWaiter>();
@@ -80,10 +86,20 @@ export class RemoteManager {
     this.transportFactory = dependencies.transportFactory ?? ((options: WebSocketTransportOptions) => new WebSocketTransport(options));
     this.createQr = dependencies.createQr ?? ((value) => QRCode.toDataURL(value, { width: 420, margin: 2, errorCorrectionLevel: "M" }));
     this.controllerUrl = dependencies.controllerUrl ?? (() => new URL(`${import.meta.env.BASE_URL}controller.html`, window.location.origin));
+    const webRtcEvents: WebRtcHostEvents = {
+      sendSignal: (message) => this.transport?.sendReliable(message) ?? false,
+      onEnvelope: (controllerSessionId, envelope) => {
+        if (this.connectionMode === "direct") this.adapter.handle(controllerSessionId, envelope);
+      },
+      onState: (controllerSessionId, connected) => this.handleWebRtcState(controllerSessionId, connected),
+    };
+    this.webRtc = dependencies.webRtcFactory?.(webRtcEvents) ?? new WebRtcHost(webRtcEvents);
     this.adapter.setPermissions(this.permissions);
     this.ui.startButton.addEventListener("click", () => void this.startRemote(), { signal });
     this.ui.showQrButton.addEventListener("click", () => void this.showQr(), { signal });
     this.ui.closeQrButton.addEventListener("click", () => void this.closeQr(), { signal });
+    this.ui.wsButton.addEventListener("click", () => this.setConnectionMode("ws"), { signal });
+    this.ui.directButton.addEventListener("click", () => this.setConnectionMode("direct"), { signal });
     for (const input of Object.values(this.ui.permissionInputs)) {
       input.addEventListener("change", () => void this.updatePermissionsFromUi(), { signal });
     }
@@ -109,6 +125,7 @@ export class RemoteManager {
     if (this.expiryTimer !== null) clearTimeout(this.expiryTimer);
     this.expiryTimer = null;
     this.adapter.resetSession();
+    this.webRtc.destroy();
     const transport = this.transport;
     this.transport = null;
     transport?.close();
@@ -257,9 +274,12 @@ export class RemoteManager {
     this.joinOpen = false;
     this.ui.join.textContent = "CLOSED";
     this.adapter.releaseAllControllers();
+    this.webRtc.setEnabled(false, []);
     this.controllers.clear();
     this.rttByController.clear();
+    this.webRtcByController.clear();
     this.pendingPings.clear();
+    this.updateWebRtcStatus();
     this.renderControllerState();
     this.rejectPending("Remote connection closed");
     this.hideQrView();
@@ -319,9 +339,12 @@ export class RemoteManager {
     this.joinOpen = false;
     this.ui.join.textContent = "CLOSED";
     this.adapter.resetSession();
+    this.webRtc.setEnabled(false, []);
     this.controllers.clear();
     this.rttByController.clear();
+    this.webRtcByController.clear();
     this.pendingPings.clear();
+    this.updateWebRtcStatus();
     this.renderControllerState();
     this.rejectPending("Remote session ended");
     this.rejectReadyWaiters("Remote session ended");
@@ -374,21 +397,31 @@ export class RemoteManager {
         this.syncPermissionInputs();
         this.controllers.clear();
         message.controllers.forEach((controller) => this.controllers.add(controller.controllerSessionId));
+        this.webRtc.setEnabled(this.connectionMode === "direct", this.controllers);
         if (!message.joinOpen) this.hideQrView();
         this.renderControllerState();
         return;
       case "controllerConnected":
         this.controllers.add(message.controllerSessionId);
+        this.webRtc.controllerConnected(message.controllerSessionId);
         this.renderControllerState();
         return;
       case "controllerDisconnected":
         this.controllers.delete(message.controllerSessionId);
         this.rttByController.delete(message.controllerSessionId);
+        this.webRtcByController.delete(message.controllerSessionId);
+        this.webRtc.controllerDisconnected(message.controllerSessionId);
         this.adapter.releaseController(message.controllerSessionId);
         this.renderControllerState();
         return;
       case "remote":
-        this.adapter.handle(message.controllerSessionId, message.envelope);
+        if (this.connectionMode === "ws") this.adapter.handle(message.controllerSessionId, message.envelope);
+        return;
+      case "rtcAnswer":
+        void this.webRtc.handleAnswer(message);
+        return;
+      case "rtcIceCandidate":
+        void this.webRtc.handleCandidate(message);
         return;
       case "pong":
         this.handlePong(message.controllerSessionId, message.nonce);
@@ -500,9 +533,40 @@ export class RemoteManager {
     this.ui.stats.replaceChildren(...[...this.controllers].map((id, index) => {
       const row = document.createElement("div");
       const rtt = this.rttByController.get(id);
-      row.innerHTML = `<b>#${index + 1}</b><span>RTT ${rtt === undefined ? "—" : `${Math.round(rtt)} ms`}</span><span>One-way ${rtt === undefined ? "—" : `~${Math.round(rtt / 2)} ms`}</span>`;
+      const direct = this.webRtcByController.get(id) === true ? "CONNECTED" : "DISCONNECTED";
+      row.innerHTML = `<b>#${index + 1}</b><span>RTT ${rtt === undefined ? "—" : `${Math.round(rtt)} ms`}</span><span>One-way ${rtt === undefined ? "—" : `~${Math.round(rtt / 2)} ms`}</span><span>WebRTC ${direct}</span>`;
       return row;
     }));
+  }
+
+  /** 手動選択したtransportだけからRemoteEnvelopeを受け付ける */
+  private setConnectionMode(mode: RemoteConnectionMode): void {
+    if (this.connectionMode === mode) return;
+    this.adapter.releaseAllControllers();
+    this.connectionMode = mode;
+    this.webRtc.setEnabled(mode === "direct", this.controllers);
+    this.ui.wsButton.classList.toggle("selected", mode === "ws");
+    this.ui.directButton.classList.toggle("selected", mode === "direct");
+    this.ui.wsButton.setAttribute("aria-pressed", String(mode === "ws"));
+    this.ui.directButton.setAttribute("aria-pressed", String(mode === "direct"));
+    this.ui.transport.textContent = mode === "ws" ? "WebSocket" : "WebRTC";
+    this.ui.path.textContent = mode === "ws" ? "WS RELAY" : "DIRECT";
+    this.updateWebRtcStatus();
+    this.renderControllerState();
+  }
+
+  /** peer切断時にController固有のHoldを解放して状態表示を更新する */
+  private handleWebRtcState(controllerSessionId: string, connected: boolean): void {
+    this.webRtcByController.set(controllerSessionId, connected);
+    if (!connected) this.adapter.releaseController(controllerSessionId);
+    this.updateWebRtcStatus();
+    this.renderControllerState();
+  }
+
+  /** DIRECT選択時の全体WebRTC状態をUIへ反映する */
+  private updateWebRtcStatus(): void {
+    const connected = this.connectionMode === "direct" && [...this.webRtcByController.values()].some(Boolean);
+    this.ui.webRtcStatus.textContent = `WebRTC ${connected ? "CONNECTED" : "DISCONNECTED"}`;
   }
 
   /** server確定permissionsをcheckboxへ同期する */
