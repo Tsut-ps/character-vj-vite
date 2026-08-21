@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { createSecretToken, hashToken } from "../src/auth";
+import { constantTimeEqual, createSecretToken, hashToken } from "../src/auth";
 import type { Room } from "../src/Room";
 import { MAX_CONTROLLER_SESSIONS } from "../src/protocol";
 
@@ -41,6 +41,15 @@ async function setJoin(stub: DurableObjectStub<Room>, open: boolean, secret?: st
 }
 
 describe("Room secret and ticket lifecycle", () => {
+  it("固定長hashだけを定時間比較する", async () => {
+    const first = await hashToken("first");
+    const same = await hashToken("first");
+    const different = await hashToken("different");
+    expect(constantTimeEqual(first, same)).toBe(true);
+    expect(constantTimeEqual(first, different)).toBe(false);
+    expect(constantTimeEqual(first, "invalid")).toBe(false);
+  });
+
   it("joinOpen=falseでJOINを拒否する", async () => {
     const fixture = await createFixture();
     const result = await fixture.stub.joinWithSecret(createSecretToken(), await hashToken(createSecretToken()), crypto.randomUUID(), Date.now() + 60_000);

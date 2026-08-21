@@ -74,7 +74,7 @@ async function readSmallJson(request: Request): Promise<unknown | null> {
   try {
     if (!request.body) return null;
     const reader = request.body.getReader();
-    const decoder = new TextDecoder("utf-8", { fatal: true });
+    const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
     let received = 0;
     let text = "";
     while (true) {

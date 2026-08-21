@@ -1,4 +1,5 @@
 const TOKEN_BYTES = 32;
+const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/u;
 
 /** Web CryptoでURL-safeな高エントロピーtokenを生成する */
 export function createSecretToken(): string {
@@ -14,12 +15,9 @@ export async function hashToken(token: string): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-/** hash比較の一致位置から推測情報が漏れにくいよう全byteを比較する */
+/** 固定長hashをWeb Cryptoで定時間比較する */
 export function constantTimeEqual(left: string, right: string): boolean {
-  const maxLength = Math.max(left.length, right.length);
-  let difference = left.length ^ right.length;
-  for (let index = 0; index < maxLength; index += 1) {
-    difference |= (left.charCodeAt(index) || 0) ^ (right.charCodeAt(index) || 0);
-  }
-  return difference === 0;
+  if (!SHA256_HEX_PATTERN.test(left) || !SHA256_HEX_PATTERN.test(right)) return false;
+  const encoder = new TextEncoder();
+  return crypto.subtle.timingSafeEqual(encoder.encode(left), encoder.encode(right));
 }
