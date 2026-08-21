@@ -10,7 +10,7 @@ export type EffectId =
 
 export type Quantize = "off" | "1/8" | "1/4" | "1beat" | "1bar";
 
-export type InputSource = "keyboard" | "gamepad" | "midi" | "ui";
+export type InputSource = "keyboard" | "gamepad" | "midi" | "ui" | "remote";
 
 interface BaseInputAction {
   source: InputSource;
