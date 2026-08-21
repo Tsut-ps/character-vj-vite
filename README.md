@@ -301,3 +301,51 @@ npm test
 開発の息抜きにCodexに書いてもらっただけなので、Unlicenseとします。自由に使ってOKです
 
 そのため、使用・再配布・魔改造に関して特に許諾も不要です
+
+## Remote transport modes (AUTO / DIRECT / TURN / WS RELAY)
+
+Audience controllers join through the existing QR/Cloudflare Room flow. The Host is the authority for the connection mode and all controllers follow the selected mode.
+
+- **AUTO**: commands can use WS Relay immediately while WebRTC negotiates in parallel. When the reliable ordered DataChannel opens, commands switch to WebRTC. ICE may select a direct candidate or TURN. If WebRTC is unavailable, WS Relay remains usable.
+- **DIRECT**: WebRTC with STUN only. No automatic relay fallback.
+- **TURN**: WebRTC with Cloudflare Realtime TURN and `iceTransportPolicy: "relay"`.
+- **WS RELAY**: the Phase 1 path, Controller → Durable Object → Host.
+
+The Cloudflare WebSocket remains connected in every mode as the control plane for Room/Auth, QR join state, permissions, controller presence, WebRTC signaling, and WS fallback. Controllers never create PeerConnections to each other; each controller connects only to the Host.
+
+The Remote UI reports the transport, the selected ICE path (`DIRECT`, `TURN`, `WS RELAY`, or `UNKNOWN`), RTT, and an estimated one-way delay (`~RTT/2`). WebRTC RTT is measured over the DataChannel, while WS RTT uses the existing Room ping/pong path.
+
+### Cloudflare TURN setup
+
+Create a TURN key in Cloudflare Realtime/TURN. Keep the long-lived credentials only in the Worker and register them as Wrangler secrets:
+
+```bash
+cd remote-worker
+npx wrangler secret put TURN_KEY_ID
+npx wrangler secret put TURN_KEY_API_TOKEN
+npx wrangler deploy
+```
+
+For local Worker development, copy `.dev.vars.example` to `.dev.vars` and fill the values. Do not commit `.dev.vars`.
+
+The Worker exchanges the long-lived TURN key for short-lived ICE credentials. TURN secrets must never be placed in `VITE_*`, GitHub Pages, QR URLs, or the browser bundle.
+
+The frontend still only needs the public Worker URL:
+
+```env
+VITE_REMOTE_BASE_URL=https://<your-worker>.workers.dev
+```
+
+If GitHub Pages is built by GitHub Actions, expose `VITE_REMOTE_BASE_URL` as a repository/environment variable in the same way as the existing deployment. No Cloudflare TURN secret is needed on GitHub.
+
+### Remote smoke test
+
+1. Start/deploy the Worker and build the Vite app with `VITE_REMOTE_BASE_URL`.
+2. Start Remote on the Host, show the QR, and join from a phone.
+3. Verify `WS RELAY` first: cues 1–9, hold, permissions, QR close semantics, and disconnect cleanup.
+4. Select `DIRECT`; verify WebRTC connects and `PATH` becomes `DIRECT` (or `UNKNOWN` if the browser cannot expose the selected pair).
+5. Select `TURN`; verify WebRTC connects and `PATH` becomes `TURN`.
+6. Select `AUTO`; verify input works immediately over WS and moves to WebRTC when the DataChannel opens. If WebRTC is unavailable, input should continue over WS.
+7. Repeat on Wi-Fi/mobile combinations as needed and compare RTT shown by the Host/Controller UI.
+
+The Room lifetime remains one hour and the existing audience/session/rate-limit behavior is unchanged.

@@ -1,4 +1,4 @@
-import type { RemoteConnectionMode, RemotePermissions } from "../app/remote/RemoteProtocol";
+import type { RemoteConnectionMode, RemotePath, RemotePermissions } from "../app/remote/RemoteProtocol";
 import { DEFAULT_REMOTE_PERMISSIONS } from "../app/remote/RemoteProtocol";
 import { ControllerConnection } from "./ControllerConnection";
 import { ControllerCueTracker } from "./ControllerCueTracker";
@@ -16,7 +16,6 @@ export class ControllerApp {
   private connectionMode: RemoteConnectionMode = "ws";
   private webRtcConnected = false;
 
-  /** Controller DOMを生成してQR fragmentからJOINを開始する */
   constructor(host: HTMLElement) {
     this.host = host;
     this.host.innerHTML = this.template();
@@ -24,12 +23,12 @@ export class ControllerApp {
       onStatus: (status, detail) => this.setStatus(status, detail),
       onPermissions: (permissions) => this.setPermissions(permissions),
       onLatency: (rttMs) => this.setLatency(rttMs),
-      onWebRtcState: (connected) => this.setWebRtcState(connected),
+      onWebRtcState: (connected, path) => this.setWebRtcState(connected, path),
+      onConnectionMode: (mode) => this.setConnectionMode(mode),
     });
     this.bindControls();
   }
 
-  /** roomとjoin secretが揃った場合だけJOIN requestを送る */
   async start(): Promise<void> {
     const fragment = new URLSearchParams(window.location.hash.slice(1));
     const roomId = fragment.get("room");
@@ -46,14 +45,12 @@ export class ControllerApp {
     }
   }
 
-  /** reconnectとpointer stateを破棄する */
   destroy(): void {
     this.releaseHeldCues();
     this.lifecycleAbort.abort();
     this.connection.destroy();
   }
 
-  /** cueとtransport表示を含むcontroller markupを返す */
   private template(): string {
     const cueButtons = Array.from({ length: 9 }, (_, index) => {
       const cue = index + 1;
@@ -69,14 +66,13 @@ export class ControllerApp {
           <button data-command="record">REC</button>
         </div>
         <button class="clear" data-command="clear">CLEAR</button>
-        <div class="controller-connection"><span>CONNECTION</span><div><button class="selected" data-connection="ws" aria-pressed="true">WS RELAY</button><button data-connection="direct" aria-pressed="false" disabled>DIRECT</button></div><b data-webrtc-status>WebRTC DISCONNECTED</b></div>
+        <div class="controller-connection"><span>MODE</span><b data-mode>WS RELAY</b><b data-webrtc-status>WebRTC DISCONNECTED</b></div>
         <div class="controller-path"><span>Transport</span><b data-transport>WebSocket</b><span>Path</span><b data-path>WS RELAY</b></div>
         <p data-detail></p>
       </section>
     `;
   }
 
-  /** pointer captureを使いdownと全release eventを対称に接続する */
   private bindControls(): void {
     const signal = this.lifecycleAbort.signal;
     this.host.addEventListener("contextmenu", (event) => event.preventDefault(), { signal });
@@ -91,15 +87,7 @@ export class ControllerApp {
         event.preventDefault();
         if (button.disabled) return;
         const type = button.dataset.command;
-        if (type === "tap" || type === "sync" || type === "record" || type === "clear") {
-          this.connection.sendCommand({ type });
-        }
-      }, { signal });
-    }
-    for (const button of this.host.querySelectorAll<HTMLButtonElement>("[data-connection]")) {
-      button.addEventListener("click", () => {
-        const mode = button.dataset.connection;
-        if (mode === "ws" || mode === "direct") this.setConnectionMode(mode);
+        if (type === "tap" || type === "sync" || type === "record" || type === "clear") this.connection.sendCommand({ type });
       }, { signal });
     }
     window.addEventListener("blur", () => this.releaseHeldCues(), { signal });
@@ -109,7 +97,6 @@ export class ControllerApp {
     }, { signal });
   }
 
-  /** pointerdownをcue downへ変換して送信成功時だけactive表示にする */
   private onCueDown(event: PointerEvent, button: HTMLButtonElement): void {
     event.preventDefault();
     const cue = Number(button.dataset.cue);
@@ -117,14 +104,9 @@ export class ControllerApp {
     if (!this.connection.sendCommand({ type: "cue", cue: cue as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9, state: "down" })) return;
     this.cueTracker.hold(event.pointerId, cue);
     button.classList.add("active");
-    try {
-      button.setPointerCapture(event.pointerId);
-    } catch {
-      this.onCueRelease(event);
-    }
+    try { button.setPointerCapture(event.pointerId); } catch { this.onCueRelease(event); }
   }
 
-  /** pointerup系eventを一度だけcue upへ変換する */
   private onCueRelease(event: PointerEvent): void {
     const cue = this.cueTracker.release(event.pointerId);
     if (cue === null) return;
@@ -132,13 +114,11 @@ export class ControllerApp {
     this.host.querySelector<HTMLButtonElement>(`[data-cue="${cue}"]`)?.classList.remove("active");
   }
 
-  /** connection切断時にstale hold表示をlocalだけで解除する */
   private releaseLocalPointers(): void {
     this.cueTracker.releaseAll();
     for (const button of this.host.querySelectorAll(".cue.active")) button.classList.remove("active");
   }
 
-  /** ページ離脱前に保持中CueのUpをOPEN中だけ送信する */
   private releaseHeldCues(): void {
     for (const cue of this.cueTracker.releaseAll()) {
       this.connection.sendCommand({ type: "cue", cue: cue as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9, state: "up" });
@@ -146,69 +126,65 @@ export class ControllerApp {
     for (const button of this.host.querySelectorAll(".cue.active")) button.classList.remove("active");
   }
 
-  /** 接続状態と補足errorをheaderへ反映する */
   private setStatus(status: ControllerStatus, detail?: string): void {
     this.status = status;
     const label = this.required<HTMLElement>("[data-status]");
-    const text = status === "connected" ? "CONNECTED" : status.toUpperCase();
-    label.textContent = `● ${text}`;
+    label.textContent = `● ${status === "connected" ? "CONNECTED" : status.toUpperCase()}`;
     label.dataset.state = status;
     this.required<HTMLElement>("[data-detail]").textContent = detail ?? "";
     if (status !== "connected") this.releaseLocalPointers();
     this.applyDisabledState();
   }
 
-  /** server配布permissionsを各操作buttonのdisabledへ反映する */
   private setPermissions(permissions: RemotePermissions): void {
     if (this.permissions.cue && !permissions.cue) this.releaseLocalPointers();
     this.permissions = permissions;
     this.applyDisabledState();
   }
 
-  /** Host performance.nowで測ったRTTをcontroller headerへ表示する */
   private setLatency(rttMs: number): void {
     this.required<HTMLElement>("[data-latency]").textContent = `${Math.round(rttMs)} ms`;
   }
 
-  /** WebRTC peer状態を表示してDIRECT切断時のlocal Holdを解放する */
-  private setWebRtcState(connected: boolean): void {
+  private setConnectionMode(mode: RemoteConnectionMode): void {
+    if (this.connectionMode !== mode) this.releaseLocalPointers();
+    this.connectionMode = mode;
+    this.required<HTMLElement>("[data-mode]").textContent = this.modeLabel(mode);
+    if (mode === "ws") {
+      this.required<HTMLElement>("[data-transport]").textContent = "WebSocket";
+      this.required<HTMLElement>("[data-path]").textContent = "WS RELAY";
+      this.required<HTMLElement>("[data-webrtc-status]").textContent = "WebRTC DISCONNECTED";
+    }
+    this.applyDisabledState();
+  }
+
+  private setWebRtcState(connected: boolean, path: RemotePath): void {
     this.webRtcConnected = connected;
     this.required<HTMLElement>("[data-webrtc-status]").textContent = `WebRTC ${connected ? "CONNECTED" : "DISCONNECTED"}`;
-    if (!connected && this.connectionMode === "direct") this.releaseLocalPointers();
+    if (this.connectionMode !== "ws") {
+      const useWebRtc = connected;
+      this.required<HTMLElement>("[data-transport]").textContent = useWebRtc ? "WebRTC" : (this.connectionMode === "auto" ? "WebSocket" : "WebRTC");
+      this.required<HTMLElement>("[data-path]").textContent = useWebRtc ? path : (this.connectionMode === "auto" ? "WS RELAY" : path);
+    }
+    if (!connected && (this.connectionMode === "direct" || this.connectionMode === "turn")) this.releaseLocalPointers();
     this.applyDisabledState();
   }
 
-  /** 保持中Cueを旧transportで解放して手動接続モードを切り替える */
-  private setConnectionMode(mode: RemoteConnectionMode): void {
-    if (mode === "direct" && !this.webRtcConnected) return;
-    if (this.connectionMode === mode) return;
-    this.releaseHeldCues();
-    this.connectionMode = mode;
-    this.connection.setConnectionMode(mode);
-    const wsButton = this.required<HTMLButtonElement>("[data-connection=ws]");
-    const directButton = this.required<HTMLButtonElement>("[data-connection=direct]");
-    wsButton.classList.toggle("selected", mode === "ws");
-    directButton.classList.toggle("selected", mode === "direct");
-    wsButton.setAttribute("aria-pressed", String(mode === "ws"));
-    directButton.setAttribute("aria-pressed", String(mode === "direct"));
-    this.required<HTMLElement>("[data-transport]").textContent = mode === "ws" ? "WebSocket" : "WebRTC";
-    this.required<HTMLElement>("[data-path]").textContent = mode === "ws" ? "WS RELAY" : "DIRECT";
-    this.applyDisabledState();
-  }
-
-  /** connectionとpermissionsの両方を満たす操作だけ有効化する */
   private applyDisabledState(): void {
-    const connected = this.status === "connected" && (this.connectionMode === "ws" || this.webRtcConnected);
+    const transportReady = this.connectionMode === "ws" || this.connectionMode === "auto" || this.webRtcConnected;
+    const connected = this.status === "connected" && transportReady;
     for (const button of this.host.querySelectorAll<HTMLButtonElement>("[data-cue]")) button.disabled = !connected || !this.permissions.cue;
     this.required<HTMLButtonElement>("[data-command=tap]").disabled = !connected || !this.permissions.tapSync;
     this.required<HTMLButtonElement>("[data-command=sync]").disabled = !connected || !this.permissions.tapSync;
     this.required<HTMLButtonElement>("[data-command=record]").disabled = !connected || !this.permissions.record;
     this.required<HTMLButtonElement>("[data-command=clear]").disabled = !connected || !this.permissions.clear;
-    this.required<HTMLButtonElement>("[data-connection=ws]").disabled = this.status !== "connected";
-    this.required<HTMLButtonElement>("[data-connection=direct]").disabled = this.status !== "connected" || !this.webRtcConnected;
   }
 
-  /** 必須elementを取得してtemplate不整合を早期検出する */
+  private modeLabel(mode: RemoteConnectionMode): string {
+    if (mode === "ws") return "WS RELAY";
+    return mode.toUpperCase();
+  }
+
   private required<T extends Element>(selector: string): T {
     const element = this.host.querySelector<T>(selector);
     if (!element) throw new Error(`Controller element not found: ${selector}`);

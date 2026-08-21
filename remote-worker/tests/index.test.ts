@@ -306,32 +306,34 @@ describe("Worker edge security", () => {
     controller.accept();
     await controllerReady;
 
+    const rtcSessionId = crypto.randomUUID();
     const offerReceived = waitForMessage(controller, (message) => message.type === "rtcOffer");
     host.send(JSON.stringify({
       v: 1,
       type: "rtcOffer",
       controllerSessionId,
+      rtcSessionId,
       sdp: `v=0\r\n${"a".repeat(2_000)}`,
     }));
-    expect(await offerReceived).toMatchObject({ type: "rtcOffer", controllerSessionId });
+    expect(await offerReceived).toMatchObject({ type: "rtcOffer", controllerSessionId, rtcSessionId });
 
     const answerReceived = waitForMessage(host, (message) => message.type === "rtcAnswer");
-    controller.send(JSON.stringify({ v: 1, type: "rtcAnswer", sdp: "v=0\r\n" }));
-    expect(await answerReceived).toMatchObject({ type: "rtcAnswer", controllerSessionId });
+    controller.send(JSON.stringify({ v: 1, type: "rtcAnswer", rtcSessionId, sdp: "v=0\r\n" }));
+    expect(await answerReceived).toMatchObject({ type: "rtcAnswer", controllerSessionId, rtcSessionId });
 
     const candidate = { candidate: "candidate:1", sdpMid: "0", sdpMLineIndex: 0, usernameFragment: null };
     const controllerCandidate = waitForMessage(controller, (message) => message.type === "rtcIceCandidate");
-    host.send(JSON.stringify({ v: 1, type: "rtcIceCandidate", controllerSessionId, candidate }));
-    expect(await controllerCandidate).toMatchObject({ type: "rtcIceCandidate", controllerSessionId, candidate });
+    host.send(JSON.stringify({ v: 1, type: "rtcIceCandidate", controllerSessionId, rtcSessionId, candidate }));
+    expect(await controllerCandidate).toMatchObject({ type: "rtcIceCandidate", controllerSessionId, rtcSessionId, candidate });
     const hostCandidate = waitForMessage(host, (message) => message.type === "rtcIceCandidate");
-    controller.send(JSON.stringify({ v: 1, type: "rtcIceCandidate", candidate }));
-    expect(await hostCandidate).toMatchObject({ type: "rtcIceCandidate", controllerSessionId, candidate });
+    controller.send(JSON.stringify({ v: 1, type: "rtcIceCandidate", rtcSessionId, candidate }));
+    expect(await hostCandidate).toMatchObject({ type: "rtcIceCandidate", controllerSessionId, rtcSessionId, candidate });
 
     const controllerRejected = waitForMessage(controller, (message) => message.type === "error");
-    controller.send(JSON.stringify({ v: 1, type: "rtcOffer", controllerSessionId, sdp: "v=0" }));
+    controller.send(JSON.stringify({ v: 1, type: "rtcOffer", controllerSessionId, rtcSessionId, sdp: "v=0" }));
     expect(await controllerRejected).toMatchObject({ code: "forbidden_message" });
     const hostRejected = waitForMessage(host, (message) => message.type === "error");
-    host.send(JSON.stringify({ v: 1, type: "rtcAnswer", controllerSessionId, sdp: "v=0" }));
+    host.send(JSON.stringify({ v: 1, type: "rtcAnswer", controllerSessionId, rtcSessionId, sdp: "v=0" }));
     expect(await hostRejected).toMatchObject({ code: "forbidden_message" });
     controller.close(1000, "done");
     host.close(1000, "done");

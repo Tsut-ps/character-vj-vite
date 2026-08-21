@@ -27,8 +27,9 @@ test("DataChannelでは検証済みRemoteEnvelopeだけを受け付ける", () =
 
 test("server signalingはcontroller identity付きschemaだけを受け付ける", () => {
   const controllerSessionId = crypto.randomUUID();
-  assert.equal(parseServerMessage(JSON.stringify({ v: 1, type: "rtcOffer", controllerSessionId, sdp: "v=0" }))?.type, "rtcOffer");
-  assert.equal(parseServerMessage(JSON.stringify({ v: 1, type: "rtcAnswer", sdp: "v=0" })), null);
+  const rtcSessionId = crypto.randomUUID();
+  assert.equal(parseServerMessage(JSON.stringify({ v: 1, type: "rtcOffer", controllerSessionId, rtcSessionId, sdp: "v=0" }))?.type, "rtcOffer");
+  assert.equal(parseServerMessage(JSON.stringify({ v: 1, type: "rtcAnswer", rtcSessionId, sdp: "v=0" })), null);
 });
 
 test("client時計が遅れていても再接続を1時間で止める", () => {

@@ -3,6 +3,7 @@ import { z } from "zod";
 const REMOTE_PROTOCOL_VERSION = 1 as const;
 const REMOTE_COMMAND_MAX_BYTES = 1024;
 const REMOTE_SERVER_MESSAGE_MAX_BYTES = 64 * 1024;
+const REMOTE_RTC_DATA_MAX_BYTES = 2048;
 export const REMOTE_ROOM_RATE_LIMIT = 600;
 export const REMOTE_TICKET_PROTOCOL_PREFIX = "cvj-ticket.";
 export const REMOTE_SESSION_MAX_MS = 60 * 60 * 1000;
@@ -52,7 +53,13 @@ export const remoteEnvelopeSchema = z.object({
 export type RemoteCommand = z.infer<typeof remoteCommandSchema>;
 export type RemoteEnvelope = z.infer<typeof remoteEnvelopeSchema>;
 
+const remoteConnectionModeSchema = z.enum(["auto", "direct", "turn", "ws"]);
+export type RemoteConnectionMode = z.infer<typeof remoteConnectionModeSchema>;
+export type RemoteWebRtcMode = Exclude<RemoteConnectionMode, "ws">;
+export type RemotePath = "DIRECT" | "TURN" | "WS RELAY" | "UNKNOWN";
+
 const rtcSdpSchema = z.string().min(1).max(20_000);
+const rtcSessionIdSchema = z.string().uuid();
 const rtcIceCandidateSchema = z.object({
   candidate: z.string().max(4_096),
   sdpMid: z.string().max(256).nullable().optional(),
@@ -61,10 +68,10 @@ const rtcIceCandidateSchema = z.object({
 }).strict();
 
 export type RemoteIceCandidate = z.infer<typeof rtcIceCandidateSchema>;
-export type RemoteConnectionMode = "ws" | "direct";
+
 export type ControllerRtcSignal =
-  | { v: 1; type: "rtcAnswer"; sdp: string }
-  | { v: 1; type: "rtcIceCandidate"; candidate: RemoteIceCandidate };
+  | { v: 1; type: "rtcAnswer"; rtcSessionId: string; sdp: string }
+  | { v: 1; type: "rtcIceCandidate"; rtcSessionId: string; candidate: RemoteIceCandidate };
 
 const hostClientMessageSchema = z.discriminatedUnion("type", [
   z.object({ v: z.literal(1), type: z.literal("openJoin"), requestId: z.string().uuid() }).strict(),
@@ -75,17 +82,25 @@ const hostClientMessageSchema = z.discriminatedUnion("type", [
     requestId: z.string().uuid(),
     permissions: remotePermissionsSchema,
   }).strict(),
+  z.object({
+    v: z.literal(1),
+    type: z.literal("setConnectionMode"),
+    requestId: z.string().uuid(),
+    mode: remoteConnectionModeSchema,
+  }).strict(),
   z.object({ v: z.literal(1), type: z.literal("requestState"), requestId: z.string().uuid() }).strict(),
   z.object({
     v: z.literal(1),
     type: z.literal("rtcOffer"),
     controllerSessionId: z.string().uuid(),
+    rtcSessionId: rtcSessionIdSchema,
     sdp: rtcSdpSchema,
   }).strict(),
   z.object({
     v: z.literal(1),
     type: z.literal("rtcIceCandidate"),
     controllerSessionId: z.string().uuid(),
+    rtcSessionId: rtcSessionIdSchema,
     candidate: rtcIceCandidateSchema,
   }).strict(),
   z.object({
@@ -114,12 +129,13 @@ const serverMessageSchema = z.discriminatedUnion("type", [
     roomId: z.string().uuid(),
     controllerSessionId: z.string().uuid().optional(),
     permissions: remotePermissionsSchema,
+    connectionMode: remoteConnectionModeSchema,
   }).strict(),
   z.object({
     v: z.literal(1),
     type: z.literal("hostAck"),
     requestId: z.string().uuid(),
-    action: z.enum(["openJoin", "closeJoin", "setPermissions", "requestState"]),
+    action: z.enum(["openJoin", "closeJoin", "setPermissions", "setConnectionMode", "requestState"]),
     ok: z.boolean(),
     joinSecret: z.string().min(32).max(256).optional(),
     error: z.string().max(160).optional(),
@@ -129,7 +145,13 @@ const serverMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("state"),
     joinOpen: z.boolean(),
     permissions: remotePermissionsSchema,
+    connectionMode: remoteConnectionModeSchema,
     controllers: z.array(controllerSummarySchema).max(500),
+  }).strict(),
+  z.object({
+    v: z.literal(1),
+    type: z.literal("connectionMode"),
+    mode: remoteConnectionModeSchema,
   }).strict(),
   z.object({
     v: z.literal(1),
@@ -152,18 +174,21 @@ const serverMessageSchema = z.discriminatedUnion("type", [
     v: z.literal(1),
     type: z.literal("rtcOffer"),
     controllerSessionId: z.string().uuid(),
+    rtcSessionId: rtcSessionIdSchema,
     sdp: rtcSdpSchema,
   }).strict(),
   z.object({
     v: z.literal(1),
     type: z.literal("rtcAnswer"),
     controllerSessionId: z.string().uuid(),
+    rtcSessionId: rtcSessionIdSchema,
     sdp: rtcSdpSchema,
   }).strict(),
   z.object({
     v: z.literal(1),
     type: z.literal("rtcIceCandidate"),
     controllerSessionId: z.string().uuid(),
+    rtcSessionId: rtcSessionIdSchema,
     candidate: rtcIceCandidateSchema,
   }).strict(),
   z.object({ v: z.literal(1), type: z.literal("ping"), nonce: z.string().uuid() }).strict(),
@@ -205,6 +230,26 @@ export const joinRoomResponseSchema = z.object({
   permissions: remotePermissionsSchema,
 }).strict();
 
+const iceServerSchema = z.object({
+  urls: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]),
+  username: z.string().optional(),
+  credential: z.string().optional(),
+}).strict();
+
+export const iceServersResponseSchema = z.object({
+  v: z.literal(1),
+  iceServers: z.array(iceServerSchema).min(1).max(8),
+}).strict();
+
+export type RemoteIceServers = z.infer<typeof iceServersResponseSchema>["iceServers"];
+
+const rtcDataMessageSchema = z.discriminatedUnion("type", [
+  z.object({ v: z.literal(1), type: z.literal("remote"), envelope: remoteEnvelopeSchema }).strict(),
+  z.object({ v: z.literal(1), type: z.literal("ping"), nonce: z.string().uuid() }).strict(),
+  z.object({ v: z.literal(1), type: z.literal("pong"), nonce: z.string().uuid() }).strict(),
+]);
+export type RtcDataMessage = z.infer<typeof rtcDataMessageSchema>;
+
 /** commandがHostで設定された観客権限に含まれるか判定する */
 export function commandAllowed(command: RemoteCommand, permissions: RemotePermissions): boolean {
   switch (command.type) {
@@ -214,6 +259,7 @@ export function commandAllowed(command: RemoteCommand, permissions: RemotePermis
     case "record": return permissions.record;
     case "clear": return permissions.clear;
   }
+  return false;
 }
 
 /** server JSONをZod検証し不正messageをnullへ畳み込む */
@@ -234,6 +280,18 @@ export function parseRemoteEnvelopeMessage(data: unknown): RemoteEnvelope | null
   try {
     const parsed: unknown = JSON.parse(data);
     const result = remoteEnvelopeSchema.safeParse(parsed);
+    return result.success ? result.data : null;
+  } catch {
+    return null;
+  }
+}
+
+/** WebRTC DataChannel frameを小さいtyped messageへ検証する */
+export function parseRtcDataMessage(data: unknown): RtcDataMessage | null {
+  if (typeof data !== "string" || new TextEncoder().encode(data).byteLength > REMOTE_RTC_DATA_MAX_BYTES) return null;
+  try {
+    const parsed: unknown = JSON.parse(data);
+    const result = rtcDataMessageSchema.safeParse(parsed);
     return result.success ? result.data : null;
   } catch {
     return null;
