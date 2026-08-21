@@ -90,7 +90,7 @@ npm run dev
 
 ## 観客スマホ Remote（WebSocket Relay）
 
-VJ Hostの `REMOTE` → `SHOW QR` から参加受付を開き、観客のスマートフォンをリモートコントローラーとして接続できます。現在のtransportはCloudflare WebSocket Relayのみです。WebRTC、TURN、DIRECT modeはまだ含みません。
+VJ Hostの `REMOTE` → `START REMOTE` で1時間のRemote sessionを開始し、`SHOW QR` から参加受付を開いて観客のスマートフォンをリモートコントローラーとして接続できます。現在のtransportはCloudflare WebSocket Relayのみです。WebRTC、TURN、DIRECT modeはまだ含みません。
 
 ### Architecture
 
@@ -127,6 +127,8 @@ Cloudflare側はCueやBPM処理を持たず、検証済みRemoteCommandをContro
 - Room createはIPごとに2回/分、Host ticket、JOIN、WebSocket UpgradeもRate Limiting bindingで制限し、緩いIP単位の総量制限を重ねる
 - WebSocket以外のPartyServer requestはDurable Objectへ渡さず`426`で拒否
 - PartySocketは`maxEnqueuedMessages: 0`かつOPEN時のみsendし、切断中の操作を再接続後に送らない
+- Host切断時はmemory上のHost tokenから短期ticketを再発行して1回だけ再接続し、Controller切断時は自動再JOINせずQR再読取を案内
+- Host tokenはRemote session中のmemoryだけに保持し、localStorageとsessionStorageへ保存しない
 - Remote roomと全WebSocket sessionはroom作成から最大1時間とし、期限切れ時はAlarmで接続とSQLite stateを完全削除
 - 本番CORSとWebSocket Originは`ALLOWED_ORIGINS`完全一致のみ。`*`は使用しない
 
@@ -142,7 +144,7 @@ Hostから各Controllerへ1.5秒間隔でpingし、Hostの`performance.now()`だ
 
 ### Frontend dependencies
 
-- `partysocket`: reconnect対応WebSocket client
+- `partysocket`: WebSocket client（stale操作のqueueとController自動再接続は無効）
 - `zod`: network protocol runtime validation
 - `qrcode`: Host QR生成
 - `@types/qrcode`: TypeScript型（development）
@@ -161,7 +163,9 @@ Hostから各Controllerへ1.5秒間隔でpingし、Hostの`performance.now()`だ
 
 - `controller.html`
 - `src/controller/ControllerApp.ts`
+- `src/controller/ControllerCommandSender.ts`
 - `src/controller/ControllerConnection.ts`
+- `src/controller/ControllerCueTracker.ts`
 - `src/controller/main.ts`
 - `src/controller/style.css`
 - `src/app/remote/RemoteProtocol.ts`
@@ -171,13 +175,15 @@ Hostから各Controllerへ1.5秒間隔でpingし、Hostの`performance.now()`だ
 - `remote-worker/` 以下のWorker、Room、設定、生成型、テスト
 - `.env.example`
 - `tests/RemoteInputAdapter.test.ts`
+- `tests/RemoteManager.test.ts`
 - `tests/RemoteProtocol.test.ts`
+- `tests/ControllerRemote.test.ts`
 
 ### Changed files
 
 - `src/app/types.ts`: `InputSource`へ`remote`を追加
 - `src/app/VJApp.ts`: Remoteを既存`AppAction`経路へ接続
-- `src/app/ui/*`、`src/style.css`: Host REMOTE、permissions、QR、RTT UI
+- `src/app/ui/*`、`src/style.css`: Host sessionの明示開始、permissions、QR、RTT UI
 - `vite.config.ts`: `controller.html`をmulti-page entryへ追加
 - `package.json`、`package-lock.json`: Frontend依存とRemote testを追加
 - `.github/workflows/deploy.yml`: 既存Pages buildへ公開Worker URLだけを渡す
@@ -253,13 +259,15 @@ npm run deploy
 ### Production verification
 
 1. GitHub PagesのVJ画面を開き、既存のKeyboard、Gamepad、MIDI、D&D、SFX操作を確認
-2. `REMOTE` → `SHOW QR` でACK後にQRが表示されることを確認
-3. 2台以上のスマホでJOINし、Controller数と個別RTTが表示されることを確認
-4. 1〜9のtap/holdで既存Cue/Hold/AUTOが動作することを確認
-5. `CLOSE JOIN` 後に保存済みの古いQRから新規JOINできず、接続済みControllerは操作を継続できることを確認
-6. Permissionsを変更し、Controller UIとserver-side拒否の両方が反映されることを確認
-7. Cue hold中にスマホの通信を切り、Hostでholdが解放されることを確認
-8. Worker logでOrigin拒否、Rate limit、予期しないexceptionがないことを確認
+2. `REMOTE` → `START REMOTE` でHostがONLINEになることを確認
+3. `SHOW QR` でOPEN JOIN ACK後にQRが表示されることを確認
+4. 2台以上のスマホでJOINし、Controller数と個別RTTが表示されることを確認
+5. 1〜9のtap/holdで既存Cue/Hold/AUTOが動作することを確認
+6. `CLOSE JOIN` 後に保存済みの古いQRから新規JOINできず、接続済みControllerは操作を継続できることを確認
+7. Permissionsを変更し、Controller UIとserver-side拒否の両方が反映されることを確認
+8. Cue hold中にスマホの通信を切るかページを離れ、Hostでholdが解放されることを確認
+9. Hostの一時切断時にHost ticketを再発行して再接続し、Controller切断時はQR再読取表示になることを確認
+10. Worker logでOrigin拒否、Rate limit、予期しないexceptionがないことを確認
 
 ### Automated verification
 
