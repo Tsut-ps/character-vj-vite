@@ -122,7 +122,7 @@ Cloudflare側はCueやBPM処理を持たず、検証済みRemoteCommandをContro
 - Controller切断時はHostがdown中Cueへ`cue up`を生成し、hold残留を防止
 - WorkerとHostの両方で約60 message/sec/controllerを上限にし、既知の`cue up`は解放優先
 - Room全体は600 message/sec、active controllerは100、未期限切れsessionは200を上限にする
-- Room create、Host ticket、JOIN、WebSocket UpgradeをRate Limiting bindingで制限し、緩いIP単位の総量制限も重ねる
+- Room createはIPごとに2回/分、Host ticket、JOIN、WebSocket UpgradeもRate Limiting bindingで制限し、緩いIP単位の総量制限を重ねる
 - WebSocket以外のPartyServer requestはDurable Objectへ渡さず`426`で拒否
 - PartySocketは`maxEnqueuedMessages: 0`かつOPEN時のみsendし、切断中の操作を再接続後に送らない
 - Remote roomと全WebSocket sessionはroom作成から最大1時間とし、期限切れ時はAlarmで接続とSQLite stateを完全削除
