@@ -76,7 +76,7 @@ export class RemoteManager {
     this.adapter = adapter;
     this.log = log;
     this.baseUrl = dependencies.baseUrl ?? import.meta.env.VITE_REMOTE_BASE_URL?.trim() ?? "";
-    this.fetchImpl = dependencies.fetch ?? fetch;
+    this.fetchImpl = dependencies.fetch ?? ((input, init) => fetch(input, init));
     this.transportFactory = dependencies.transportFactory ?? ((options: WebSocketTransportOptions) => new WebSocketTransport(options));
     this.createQr = dependencies.createQr ?? ((value) => QRCode.toDataURL(value, { width: 420, margin: 2, errorCorrectionLevel: "M" }));
     this.controllerUrl = dependencies.controllerUrl ?? (() => new URL(`${import.meta.env.BASE_URL}controller.html`, window.location.origin));
