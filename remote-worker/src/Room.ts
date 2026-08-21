@@ -8,6 +8,7 @@ import {
   MAX_ACTIVE_CONTROLLERS,
   MAX_CONTROLLER_SESSIONS,
   MAX_ROOM_COMMANDS_PER_SECOND,
+  PENDING_CONTROLLER_TICKET_TTL_MS,
   parseJsonCandidate,
   payloadWithinLimit,
   permissionsSchema,
@@ -60,6 +61,7 @@ export interface JoinResult {
   reason?: "forbidden" | "full";
   permissions?: Permissions;
   expiresAt?: number;
+  connectBy?: number;
 }
 
 /** 1 remote roomをSQLiteとhibernatable WebSocketで管理する */
@@ -142,10 +144,11 @@ export class Room extends Server<Env> {
       return { ok: false, reason: "forbidden" };
     }
     const now = Date.now();
-    const ticketExpiresAt = Math.min(expiresAt, room.expires_at);
-    if (!Number.isSafeInteger(expiresAt) || ticketExpiresAt <= now) return { ok: false, reason: "forbidden" };
+    const sessionExpiresAt = Math.min(expiresAt, room.expires_at);
+    const ticketExpiresAt = Math.min(sessionExpiresAt, now + PENDING_CONTROLLER_TICKET_TTL_MS);
+    if (!Number.isSafeInteger(expiresAt) || sessionExpiresAt <= now) return { ok: false, reason: "forbidden" };
     const inserted = this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec("DELETE FROM tickets WHERE expires_at < ?", now);
+      this.ctx.storage.sql.exec("DELETE FROM tickets WHERE expires_at <= ?", now);
       this.ctx.storage.sql.exec(
         "DELETE FROM controllers WHERE current_connection_id IS NULL AND session_id NOT IN (SELECT controller_session_id FROM tickets WHERE controller_session_id IS NOT NULL)",
       );
@@ -165,7 +168,12 @@ export class Room extends Server<Env> {
       return true;
     });
     if (!inserted) return { ok: false, reason: "full" };
-    return { ok: true, permissions: this.parsePermissions(room.permissions_json), expiresAt: ticketExpiresAt };
+    return {
+      ok: true,
+      permissions: this.parsePermissions(room.permissions_json),
+      expiresAt: sessionExpiresAt,
+      connectBy: ticketExpiresAt,
+    };
   }
 
   /** WebSocket Upgrade前に短期ticketをroomとroleへ結び付ける */
@@ -173,13 +181,13 @@ export class Room extends Server<Env> {
     const room = await this.getActiveRoom();
     if (!room) return { ok: false };
     const now = Date.now();
-    this.ctx.storage.sql.exec("DELETE FROM tickets WHERE expires_at < ?", now);
+    this.ctx.storage.sql.exec("DELETE FROM tickets WHERE expires_at <= ?", now);
     const ticketHash = await hashToken(ticket);
     const row = this.ctx.storage.sql.exec<TicketRow>(
       "SELECT role, controller_session_id, expires_at FROM tickets WHERE ticket_hash = ?",
       ticketHash,
     ).toArray()[0];
-    if (!row || row.expires_at < now || room.expires_at <= now) return { ok: false };
+    if (!row || row.expires_at <= now || room.expires_at <= now) return { ok: false };
     if (row.role === "controller") {
       if (!row.controller_session_id) return { ok: false };
       const controller = this.ctx.storage.sql.exec<{ count: number }>(
@@ -192,7 +200,7 @@ export class Room extends Server<Env> {
       ok: true,
       role: row.role,
       controllerSessionId: row.controller_session_id ?? undefined,
-      expiresAt: Math.min(row.expires_at, room.expires_at),
+      expiresAt: row.role === "controller" ? room.expires_at : Math.min(row.expires_at, room.expires_at),
       permissions: this.parsePermissions(room.permissions_json),
     };
   }
@@ -224,7 +232,7 @@ export class Room extends Server<Env> {
       connection.close(4401, "Missing controller identity");
       return;
     } else {
-      const lastSeq = this.connectController(connection, controllerSessionId);
+      const lastSeq = this.connectController(connection, controllerSessionId, sessionExpiresAt);
       if (lastSeq === null) {
         connection.close(4429, "Room controller limit reached");
         return;
@@ -347,7 +355,7 @@ export class Room extends Server<Env> {
   }
 
   /** 同じcontroller sessionの旧接続を閉じて接続状態をhostへ通知する */
-  private connectController(connection: Connection<RemoteConnectionState>, controllerSessionId: string): number | null {
+  private connectController(connection: Connection<RemoteConnectionState>, controllerSessionId: string, sessionExpiresAt: number): number | null {
     const activeControllers = new Set(
       [...this.getConnections<RemoteConnectionState>("role:controller")]
         .map((item) => item.state?.controllerSessionId)
@@ -363,11 +371,18 @@ export class Room extends Server<Env> {
     const previousConnection = row.current_connection_id ? this.getConnection<RemoteConnectionState>(row.current_connection_id) : undefined;
     const lastSeq = Math.max(row.last_seq, previousConnection?.state?.lastSeq ?? -1);
     this.currentControllerConnections.set(controllerSessionId, connection.id);
-    this.ctx.storage.sql.exec(
-      "UPDATE controllers SET current_connection_id = ? WHERE session_id = ?",
-      connection.id,
-      controllerSessionId,
-    );
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec(
+        "UPDATE controllers SET current_connection_id = ? WHERE session_id = ?",
+        connection.id,
+        controllerSessionId,
+      );
+      this.ctx.storage.sql.exec(
+        "UPDATE tickets SET expires_at = ? WHERE role = 'controller' AND controller_session_id = ?",
+        sessionExpiresAt,
+        controllerSessionId,
+      );
+    });
     if (row?.current_connection_id && row.current_connection_id !== connection.id) {
       this.getConnection(row.current_connection_id)?.close(4002, "Controller reconnected");
     }

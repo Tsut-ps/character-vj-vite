@@ -3,6 +3,7 @@ import { z } from "zod";
 export const PROTOCOL_VERSION = 1 as const;
 export const MAX_CLIENT_MESSAGE_BYTES = 1024;
 export const SESSION_TICKET_TTL_MS = 60 * 60 * 1000;
+export const PENDING_CONTROLLER_TICKET_TTL_MS = 60 * 1000;
 export const MAX_CONTROLLER_SESSIONS = 200;
 export const MAX_ACTIVE_CONTROLLERS = 100;
 export const MAX_ROOM_COMMANDS_PER_SECOND = 600;

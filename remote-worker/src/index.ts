@@ -179,13 +179,14 @@ app.post("/v1/rooms/:roomId/join", async (c) => {
     requestedExpiresAt,
   );
   if (result.reason === "full") return c.json({ error: "room_full" }, 429);
-  if (!result.ok || !result.permissions || !result.expiresAt) return c.json({ error: "forbidden" }, 403);
+  if (!result.ok || !result.permissions || !result.expiresAt || !result.connectBy) return c.json({ error: "forbidden" }, 403);
   return c.json({
     v: 1,
     roomId,
     controllerSessionId,
     sessionTicket,
     expiresAt: result.expiresAt,
+    connectBy: result.connectBy,
     permissions: result.permissions,
   });
 });

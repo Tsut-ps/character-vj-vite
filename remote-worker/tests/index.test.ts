@@ -167,7 +167,7 @@ describe("Worker edge security", () => {
     const hostTicket = createSecretToken();
     const controllerTicket = createSecretToken();
     const controllerSessionId = crypto.randomUUID();
-    const expiresAt = Date.now() + 60_000;
+    const expiresAt = Date.now() + 5 * 60_000;
     const stub = env.Room.getByName(roomId);
     await stub.initializeRoom(await hashToken(hostToken), await hashToken(hostTicket), expiresAt);
     const joinSecret = createSecretToken();
@@ -183,6 +183,13 @@ describe("Worker edge security", () => {
       controllerSessionId,
       expiresAt,
     )).ok).toBe(true);
+    await runInDurableObject(stub, (_instance, state) => {
+      const pending = state.storage.sql.exec<{ expires_at: number }>(
+        "SELECT expires_at FROM tickets WHERE controller_session_id = ?",
+        controllerSessionId,
+      ).one();
+      expect(pending.expires_at).toBeLessThan(expiresAt);
+    });
 
     const hostResponse = await SELF.fetch(`https://worker.test/parties/room/${roomId}`, { headers: socketHeaders(hostTicket) });
     const host = hostResponse.webSocket!;
@@ -195,6 +202,13 @@ describe("Worker edge security", () => {
     const controllerReady = waitForMessage(controller, (message) => message.type === "ready");
     controller.accept();
     await controllerReady;
+    await runInDurableObject(stub, (_instance, state) => {
+      const active = state.storage.sql.exec<{ expires_at: number }>(
+        "SELECT expires_at FROM tickets WHERE controller_session_id = ?",
+        controllerSessionId,
+      ).one();
+      expect(active.expires_at).toBe(expiresAt);
+    });
 
     const firstRemote = waitForMessage(host, (message) => message.type === "remote");
     controller.send(JSON.stringify({ v: 1, seq: 1, command: { type: "cue", cue: 1, state: "down" } }));

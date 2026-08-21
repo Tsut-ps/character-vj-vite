@@ -2,7 +2,7 @@ import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test"
 import { describe, expect, it } from "vitest";
 import { constantTimeEqual, createSecretToken, hashToken } from "../src/auth";
 import type { Room } from "../src/Room";
-import { MAX_CONTROLLER_SESSIONS } from "../src/protocol";
+import { MAX_CONTROLLER_SESSIONS, PENDING_CONTROLLER_TICKET_TTL_MS } from "../src/protocol";
 
 interface Fixture {
   roomId: string;
@@ -13,11 +13,11 @@ interface Fixture {
 }
 
 /** 独立DOへhost tokenとticketを初期化する */
-async function createFixture(): Promise<Fixture> {
+async function createFixture(ttlMs = 60_000): Promise<Fixture> {
   const roomId = crypto.randomUUID();
   const hostToken = createSecretToken();
   const hostTicket = createSecretToken();
-  const expiresAt = Date.now() + 60_000;
+  const expiresAt = Date.now() + ttlMs;
   const stub = env.Room.getByName(roomId);
   const initialized = await stub.initializeRoom(
     await hashToken(hostToken),
@@ -148,6 +148,30 @@ describe("Room secret and ticket lifecycle", () => {
       Date.now() + 3_600_000,
     );
     expect(joined.expiresAt).toBe(fixture.expiresAt);
+  });
+
+  it("未接続controller ticketを1分で失効させる", async () => {
+    const fixture = await createFixture(60 * 60 * 1000);
+    const secret = createSecretToken();
+    const ticket = createSecretToken();
+    const joinedAt = Date.now();
+    await setJoin(fixture.stub, true, secret);
+    const joined = await fixture.stub.joinWithSecret(
+      secret,
+      await hashToken(ticket),
+      crypto.randomUUID(),
+      fixture.expiresAt,
+    );
+    expect(joined.expiresAt).toBe(fixture.expiresAt);
+    expect(joined.connectBy).toBeLessThan(fixture.expiresAt);
+    await runInDurableObject(fixture.stub, (_instance, state) => {
+      const row = state.storage.sql.exec<{ expires_at: number }>(
+        "SELECT expires_at FROM tickets WHERE role = 'controller'",
+      ).one();
+      expect(row.expires_at).toBeGreaterThan(joinedAt);
+      expect(row.expires_at).toBeLessThanOrEqual(joinedAt + PENDING_CONTROLLER_TICKET_TTL_MS + 100);
+      expect(row.expires_at).toBe(joined.connectBy);
+    });
   });
 
   it("期限切れroomの認証情報とSQLiteを完全削除する", async () => {
