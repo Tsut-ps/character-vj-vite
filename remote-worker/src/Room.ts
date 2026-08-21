@@ -531,7 +531,9 @@ export class Room extends Server<Env> {
 
   /** 指定controller sessionだけへmessageを送る */
   private sendToController(controllerSessionId: string, message: unknown): void {
-    for (const controller of this.getConnections(`controller:${controllerSessionId}`)) this.send(controller, message);
+    const connectionId = this.currentControllerConnections.get(controllerSessionId);
+    const controller = connectionId ? this.getConnection(connectionId) : undefined;
+    if (controller) this.send(controller, message);
   }
 
   /** JSON server messageを単一接続へ送る */

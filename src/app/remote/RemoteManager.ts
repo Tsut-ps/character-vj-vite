@@ -5,6 +5,7 @@ import {
   createRoomResponseSchema,
   DEFAULT_REMOTE_PERMISSIONS,
   parseServerMessage,
+  remoteSessionTimeoutMs,
   type HostClientMessage,
   type RemotePermissions,
   type ServerMessage,
@@ -25,7 +26,7 @@ export class RemoteManager {
   private readonly log: (message: string) => void;
   private readonly baseUrl = import.meta.env.VITE_REMOTE_BASE_URL?.trim() ?? "";
   private permissions: RemotePermissions = { ...DEFAULT_REMOTE_PERMISSIONS };
-  private session: { roomId: string; hostToken: string } | null = null;
+  private session: { roomId: string; hostToken: string; expiresAt: number } | null = null;
   private transport: RemoteTransport | null = null;
   private ready = false;
   private joinOpen = false;
@@ -37,6 +38,7 @@ export class RemoteManager {
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly readyWaiters = new Set<() => void>();
   private pingTimer: number | null = null;
+  private expiryTimer: number | null = null;
 
   /** Host UIと既存AppAction adapterへremote sessionを接続する */
   constructor(
@@ -70,6 +72,8 @@ export class RemoteManager {
     }
     if (this.pingTimer !== null) window.clearInterval(this.pingTimer);
     this.pingTimer = null;
+    if (this.expiryTimer !== null) window.clearTimeout(this.expiryTimer);
+    this.expiryTimer = null;
     this.adapter.resetSession();
     this.transport?.close();
     this.transport = null;
@@ -154,8 +158,9 @@ export class RemoteManager {
     if (!response.ok) throw new Error(`Room create failed (${response.status})`);
     const parsed = createRoomResponseSchema.safeParse(await response.json());
     if (!parsed.success) throw new Error("Invalid room create response");
-    this.session = { roomId: parsed.data.roomId, hostToken: parsed.data.hostToken };
+    this.session = { roomId: parsed.data.roomId, hostToken: parsed.data.hostToken, expiresAt: parsed.data.expiresAt };
     this.connect(parsed.data.sessionTicket);
+    this.scheduleExpiry(parsed.data.expiresAt);
   }
 
   /** 短期Host ticketでbufferなしtransportへ接続する */
@@ -176,31 +181,59 @@ export class RemoteManager {
 
   /** 切断時にholdとQRを安全側へ解放する */
   private handleClose(event: CloseEvent): void {
-    if (this.destroyed) return;
+    if (this.destroyed || (!this.transport && !this.session)) return;
     const terminal = event.code === 4001 || event.code === 4003 || event.code === 4401 || event.code === 4403;
+    if (terminal) {
+      this.endSession(event.code === 4001 ? "HOST REPLACED" : "SESSION EXPIRED");
+      return;
+    }
     this.ready = false;
     this.joinOpen = false;
-    if (terminal) this.adapter.resetSession();
-    else this.adapter.releaseAllControllers();
+    this.adapter.releaseAllControllers();
     this.controllers.clear();
     this.rttByController.clear();
     this.pendingPings.clear();
     this.renderControllerState();
     this.rejectPending("Remote connection closed");
-    if (terminal) {
-      this.hideQrView();
-      this.transport?.close();
-      this.transport = null;
-      this.session = null;
-      this.ui.status.textContent = event.code === 4001 ? "HOST REPLACED" : "SESSION EXPIRED";
-      this.ui.showQrButton.disabled = !this.baseUrl;
-    } else {
-      this.ui.status.textContent = "RECONNECTING";
-      if (this.joinVisible) {
-        this.ui.qrStatus.textContent = "CONNECTION LOST — JOIN CLOSE UNCONFIRMED";
-        this.ui.closeQrButton.disabled = true;
-      }
+    this.ui.status.textContent = "RECONNECTING";
+    if (this.joinVisible) {
+      this.ui.qrStatus.textContent = "CONNECTION LOST — JOIN CLOSE UNCONFIRMED";
+      this.ui.closeQrButton.disabled = true;
     }
+  }
+
+  /** 絶対期限でHost PartySocket再接続を停止する */
+  private scheduleExpiry(expiresAt: number): void {
+    if (this.expiryTimer !== null) window.clearTimeout(this.expiryTimer);
+    const remaining = remoteSessionTimeoutMs(expiresAt);
+    if (remaining <= 0) {
+      this.endSession("SESSION EXPIRED");
+      return;
+    }
+    this.expiryTimer = window.setTimeout(() => this.endSession("SESSION EXPIRED"), remaining);
+  }
+
+  /** terminal sessionを解放して新規Room作成へ戻す */
+  private endSession(status: string): void {
+    if (this.expiryTimer !== null) window.clearTimeout(this.expiryTimer);
+    this.expiryTimer = null;
+    if (this.pingTimer !== null) window.clearInterval(this.pingTimer);
+    this.pingTimer = null;
+    this.ready = false;
+    this.joinOpen = false;
+    this.adapter.resetSession();
+    this.controllers.clear();
+    this.rttByController.clear();
+    this.pendingPings.clear();
+    this.renderControllerState();
+    this.rejectPending("Remote session ended");
+    this.hideQrView();
+    const transport = this.transport;
+    this.transport = null;
+    this.session = null;
+    transport?.close();
+    this.ui.status.textContent = status;
+    this.ui.showQrButton.disabled = !this.baseUrl;
   }
 
   /** Zod検証済みserver messageをHost stateかadapterへ振り分ける */

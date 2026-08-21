@@ -37,7 +37,7 @@ export class WebSocketTransport implements RemoteTransport {
   constructor(options: WebSocketTransportOptions) {
     const url = new URL(options.baseUrl);
     if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("Remote URL must be HTTP(S)");
-    if (url.username || url.password || (url.pathname !== "/" && url.pathname !== "")) {
+    if (url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "")) {
       throw new Error("VITE_REMOTE_BASE_URL must be an origin without credentials or path");
     }
     this.socket = new PartySocket({
@@ -81,7 +81,11 @@ export class WebSocketTransport implements RemoteTransport {
   private sendOnlyWhenOpen(message: unknown): boolean {
     if (!this.isOpen) return false;
     const encoded = JSON.stringify(message);
-    this.socket.send(encoded);
-    return true;
+    try {
+      this.socket.send(encoded);
+      return true;
+    } catch {
+      return false;
+    }
   }
 }

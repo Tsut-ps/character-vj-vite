@@ -1,8 +1,11 @@
 import {
   commandAllowed,
   DEFAULT_REMOTE_PERMISSIONS,
+  isTerminalControllerClose,
   joinRoomResponseSchema,
   parseServerMessage,
+  remoteInitialConnectTimeoutMs,
+  remoteSessionTimeoutMs,
   type RemoteCommand,
   type RemotePermissions,
 } from "../app/remote/RemoteProtocol";
@@ -22,6 +25,8 @@ export class ControllerConnection {
   private permissions: RemotePermissions = { ...DEFAULT_REMOTE_PERMISSIONS };
   private seq = 0;
   private destroyed = false;
+  private expiryTimer: number | null = null;
+  private readyTimer: number | null = null;
 
   /** Controller UI event callbacksを接続する */
   constructor(events: ControllerConnectionEvents) {
@@ -43,19 +48,26 @@ export class ControllerConnection {
     this.permissions = parsed.data.permissions;
     this.events.onPermissions(this.permissions);
     this.connect(roomId, parsed.data.sessionTicket);
+    this.scheduleExpiry(parsed.data.expiresAt);
+    this.scheduleReadyDeadline(parsed.data.connectBy);
   }
 
   /** permission確認後にseq付きcommandをbufferなしで送る */
   sendCommand(command: RemoteCommand): boolean {
     if (!commandAllowed(command, this.permissions) || !this.transport?.isOpen) return false;
     const envelope = { v: 1 as const, seq: this.seq, command };
+    if (!this.transport.sendRealtime(envelope)) return false;
     this.seq += 1;
-    return this.transport.sendRealtime(envelope);
+    return true;
   }
 
   /** reconnectを止めてconnection資源を解放する */
   destroy(): void {
     this.destroyed = true;
+    if (this.expiryTimer !== null) window.clearTimeout(this.expiryTimer);
+    this.expiryTimer = null;
+    if (this.readyTimer !== null) window.clearTimeout(this.readyTimer);
+    this.readyTimer = null;
     this.transport?.close();
     this.transport = null;
   }
@@ -71,13 +83,8 @@ export class ControllerConnection {
         onOpen: () => this.events.onStatus("connecting"),
         onClose: (event) => {
           if (this.destroyed) return;
-          if (event.code === 4003) {
-            this.destroyed = true;
-            this.transport?.close();
-            this.events.onStatus("error", "Remote session expired");
-          } else {
-            this.events.onStatus("disconnected");
-          }
+          if (isTerminalControllerClose(event.code)) this.endSession(event.code === 4002 ? "Remote session opened elsewhere" : "Remote session expired");
+          else this.events.onStatus("disconnected");
         },
         onError: () => { if (!this.destroyed) this.events.onStatus("disconnected"); },
         onMessage: (data) => this.handleMessage(data),
@@ -85,11 +92,46 @@ export class ControllerConnection {
     });
   }
 
+  /** 絶対期限でPartySocket再接続を停止する */
+  private scheduleExpiry(expiresAt: number): void {
+    const remaining = remoteSessionTimeoutMs(expiresAt);
+    if (remaining <= 0) {
+      this.endSession("Remote session expired");
+      return;
+    }
+    this.expiryTimer = window.setTimeout(() => this.endSession("Remote session expired"), remaining);
+  }
+
+  /** 初回readyがticket期限までに届かなければ再接続を止める */
+  private scheduleReadyDeadline(connectBy: number): void {
+    const remaining = remoteInitialConnectTimeoutMs(connectBy);
+    if (remaining <= 0) {
+      this.endSession("Remote connection ticket expired");
+      return;
+    }
+    this.readyTimer = window.setTimeout(() => this.endSession("Remote connection ticket expired"), remaining);
+  }
+
+  /** terminal状態へ移行して以後の自動再接続を止める */
+  private endSession(detail: string): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    if (this.expiryTimer !== null) window.clearTimeout(this.expiryTimer);
+    this.expiryTimer = null;
+    if (this.readyTimer !== null) window.clearTimeout(this.readyTimer);
+    this.readyTimer = null;
+    this.transport?.close();
+    this.transport = null;
+    this.events.onStatus("error", detail);
+  }
+
   /** server messageをZod検証してidentity非依存のUI stateだけへ反映する */
   private handleMessage(data: unknown): void {
     const message = parseServerMessage(data);
     if (!message) return;
     if (message.type === "ready" && message.role === "controller") {
+      if (this.readyTimer !== null) window.clearTimeout(this.readyTimer);
+      this.readyTimer = null;
       this.permissions = message.permissions;
       this.events.onPermissions(message.permissions);
       this.events.onStatus("connected");

@@ -5,6 +5,9 @@ export const REMOTE_MESSAGE_MAX_BYTES = 1024;
 export const REMOTE_SERVER_MESSAGE_MAX_BYTES = 64 * 1024;
 export const REMOTE_ROOM_RATE_LIMIT = 600;
 export const REMOTE_TICKET_PROTOCOL_PREFIX = "cvj-ticket.";
+export const REMOTE_SESSION_MAX_MS = 60 * 60 * 1000;
+export const REMOTE_INITIAL_CONNECT_MAX_MS = 60 * 1000;
+const TERMINAL_CONTROLLER_CLOSE_CODES = new Set([4002, 4003, 4401, 4403, 4429]);
 
 const cueNumberSchema = z.union([
   z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5),
@@ -152,6 +155,7 @@ export const joinRoomResponseSchema = z.object({
   controllerSessionId: z.string().uuid(),
   sessionTicket: z.string().min(32).max(256),
   expiresAt: z.number().int().positive(),
+  connectBy: z.number().int().positive(),
   permissions: remotePermissionsSchema,
 }).strict();
 
@@ -176,4 +180,19 @@ export function parseServerMessage(data: unknown): ServerMessage | null {
   } catch {
     return null;
   }
+}
+
+/** 自動再接続してはいけないcontroller close codeを判定する */
+export function isTerminalControllerClose(code: number): boolean {
+  return TERMINAL_CONTROLLER_CLOSE_CODES.has(code);
+}
+
+/** server期限とlocal上限の早い方を再接続停止時間にする */
+export function remoteSessionTimeoutMs(expiresAt: number, now = Date.now()): number {
+  return Math.max(0, Math.min(expiresAt - now, REMOTE_SESSION_MAX_MS));
+}
+
+/** 初回ticket期限とlocal上限の早い方を接続待機時間にする */
+export function remoteInitialConnectTimeoutMs(connectBy: number, now = Date.now()): number {
+  return Math.max(0, Math.min(connectBy - now, REMOTE_INITIAL_CONNECT_MAX_MS));
 }

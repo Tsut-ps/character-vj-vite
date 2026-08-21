@@ -221,8 +221,16 @@ describe("Worker edge security", () => {
       expect(row.last_seq).toBe(-1);
     });
 
+    const controllerReplaced = waitForClose(controller);
+    const replacementResponse = await SELF.fetch(`https://worker.test/parties/room/${roomId}`, { headers: socketHeaders(controllerTicket) });
+    const replacement = replacementResponse.webSocket!;
+    const replacementReady = waitForMessage(replacement, (message) => message.type === "ready");
+    replacement.accept();
+    await replacementReady;
+    expect((await controllerReplaced).code).toBe(4002);
+
     const disconnected = waitForMessage(host, (message) => message.type === "controllerDisconnected");
-    controller.close(1000, "checkpoint");
+    replacement.close(1000, "checkpoint");
     await disconnected;
     await runInDurableObject(stub, (_instance, state) => {
       const row = state.storage.sql.exec<{ last_seq: number; current_connection_id: string | null }>(
