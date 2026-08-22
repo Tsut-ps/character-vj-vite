@@ -1,5 +1,5 @@
 import "./style.css";
-import { ControllerApp } from "./ControllerApp";
+import { ControllerApp } from "./ControllerApp.ts";
 
 const host = document.querySelector<HTMLElement>("#controller-app");
 if (!host) throw new Error("#controller-app not found");

@@ -150,8 +150,8 @@ export class WebRtcController {
     return this.sendData({ v: 1, type: "remote", envelope });
   }
 
+  /** peerとDataChannelを破棄し選択中のmodeは維持する */
   close(): void {
-    this.mode = this.mode === "ws" ? "ws" : this.mode;
     this.closePeerOnly();
   }
 
