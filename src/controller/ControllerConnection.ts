@@ -130,18 +130,20 @@ export class ControllerConnection {
 
   /** terminal errorとしてsessionを終了する */
   private endSession(detail: string): void {
-    if (this.destroyed) return;
-    this.destroyed = true;
-    this.cleanupConnection();
-    this.events.onStatus("error", detail);
+    this.finishSession("error", detail);
   }
 
   /** 再JOINが必要な切断としてsessionを終了する */
   private disconnectSession(detail: string): void {
+    this.finishSession("disconnected", detail);
+  }
+
+  /** cleanup後に終了理由ごとのstatusを一度だけ通知する */
+  private finishSession(status: "error" | "disconnected", detail: string): void {
     if (this.destroyed) return;
     this.destroyed = true;
     this.cleanupConnection();
-    this.events.onStatus("disconnected", detail);
+    this.events.onStatus(status, detail);
   }
 
   /** session timerと全transportを同じ順序で解放する */

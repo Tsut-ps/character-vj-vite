@@ -157,26 +157,13 @@ export class RemoteManager {
     this.ui.closeQrButton.addEventListener("click", () => void this.closeQr(), {
       signal,
     });
-    this.ui.autoButton.addEventListener(
-      "click",
-      () => void this.requestConnectionMode("auto"),
-      { signal },
-    );
-    this.ui.directButton.addEventListener(
-      "click",
-      () => void this.requestConnectionMode("direct"),
-      { signal },
-    );
-    this.ui.turnButton.addEventListener(
-      "click",
-      () => void this.requestConnectionMode("turn"),
-      { signal },
-    );
-    this.ui.wsButton.addEventListener(
-      "click",
-      () => void this.requestConnectionMode("ws"),
-      { signal },
-    );
+    for (const [button, mode] of this.connectionModeButtons()) {
+      button.addEventListener(
+        "click",
+        () => void this.requestConnectionMode(mode),
+        { signal },
+      );
+    }
     for (const input of Object.values(this.ui.permissionInputs)) {
       input.addEventListener(
         "change",
@@ -332,7 +319,6 @@ export class RemoteManager {
       hostToken: parsed.data.hostToken,
       expiresAt: parsed.data.expiresAt,
     };
-    this.sessionTicket = parsed.data.sessionTicket;
     this.connect(parsed.data.sessionTicket);
     this.scheduleExpiry(parsed.data.expiresAt);
   }
@@ -384,13 +370,7 @@ export class RemoteManager {
     this.joinOpen = false;
     this.ui.join.textContent = "CLOSED";
     this.adapter.releaseAllControllers();
-    this.webRtc.setMode("ws", []);
-    this.controllers.clear();
-    this.rttByController.clear();
-    this.webRtcByController.clear();
-    this.pendingPings.clear();
-    this.renderConnectionSummary();
-    this.renderControllerState();
+    this.clearControllerConnections();
     this.rejectPending("Remote connection closed");
     this.hideQrView();
     this.ui.status.textContent = "RECONNECTING";
@@ -455,13 +435,7 @@ export class RemoteManager {
     this.joinOpen = false;
     this.ui.join.textContent = "CLOSED";
     this.adapter.resetSession();
-    this.webRtc.setMode("ws", []);
-    this.controllers.clear();
-    this.rttByController.clear();
-    this.webRtcByController.clear();
-    this.pendingPings.clear();
-    this.renderConnectionSummary();
-    this.renderControllerState();
+    this.clearControllerConnections();
     this.rejectPending("Remote session ended");
     this.rejectReadyWaiters("Remote session ended");
     this.hideQrView();
@@ -870,18 +844,33 @@ export class RemoteManager {
   }
 
   private updateModeUi(): void {
-    const entries: Array<[HTMLButtonElement, RemoteConnectionMode]> = [
-      [this.ui.autoButton, "auto"],
-      [this.ui.directButton, "direct"],
-      [this.ui.turnButton, "turn"],
-      [this.ui.wsButton, "ws"],
-    ];
-    for (const [button, mode] of entries) {
+    for (const [button, mode] of this.connectionModeButtons()) {
       const selected = this.connectionMode === mode;
       button.classList.toggle("selected", selected);
       button.setAttribute("aria-pressed", String(selected));
     }
     this.renderConnectionSummary();
+  }
+
+  /** modeと対応buttonの定義をevent登録とUI更新で共有する */
+  private connectionModeButtons(): Array<[HTMLButtonElement, RemoteConnectionMode]> {
+    return [
+      [this.ui.autoButton, "auto"],
+      [this.ui.directButton, "direct"],
+      [this.ui.turnButton, "turn"],
+      [this.ui.wsButton, "ws"],
+    ];
+  }
+
+  /** controller peerと表示用connection stateをまとめて破棄する */
+  private clearControllerConnections(): void {
+    this.webRtc.setMode("ws", []);
+    this.controllers.clear();
+    this.rttByController.clear();
+    this.webRtcByController.clear();
+    this.pendingPings.clear();
+    this.renderConnectionSummary();
+    this.renderControllerState();
   }
 
   private modeLabel(mode: RemoteConnectionMode): string {
