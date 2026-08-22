@@ -264,34 +264,37 @@ export function commandAllowed(command: RemoteCommand, permissions: RemotePermis
 
 /** server JSONをZod検証し不正messageをnullへ畳み込む */
 export function parseServerMessage(data: unknown): ServerMessage | null {
-  if (typeof data !== "string" || new TextEncoder().encode(data).byteLength > REMOTE_SERVER_MESSAGE_MAX_BYTES) return null;
-  try {
-    const parsed: unknown = JSON.parse(data);
-    const result = serverMessageSchema.safeParse(parsed);
-    return result.success ? result.data : null;
-  } catch {
-    return null;
-  }
+  return parseJsonMessage(
+    data,
+    REMOTE_SERVER_MESSAGE_MAX_BYTES,
+    serverMessageSchema,
+  );
 }
 
 /** DataChannel JSONを1 KiB上限とZodでRemoteEnvelopeへ検証する */
 export function parseRemoteEnvelopeMessage(data: unknown): RemoteEnvelope | null {
-  if (typeof data !== "string" || new TextEncoder().encode(data).byteLength > REMOTE_COMMAND_MAX_BYTES) return null;
-  try {
-    const parsed: unknown = JSON.parse(data);
-    const result = remoteEnvelopeSchema.safeParse(parsed);
-    return result.success ? result.data : null;
-  } catch {
-    return null;
-  }
+  return parseJsonMessage(data, REMOTE_COMMAND_MAX_BYTES, remoteEnvelopeSchema);
 }
 
 /** WebRTC DataChannel frameを小さいtyped messageへ検証する */
 export function parseRtcDataMessage(data: unknown): RtcDataMessage | null {
-  if (typeof data !== "string" || new TextEncoder().encode(data).byteLength > REMOTE_RTC_DATA_MAX_BYTES) return null;
+  return parseJsonMessage(data, REMOTE_RTC_DATA_MAX_BYTES, rtcDataMessageSchema);
+}
+
+/** JSON受信境界を共通化してsize制限とschema検証の差異を防ぐ */
+function parseJsonMessage<T>(
+  data: unknown,
+  maxBytes: number,
+  schema: z.ZodType<T>,
+): T | null {
+  if (
+    typeof data !== "string" ||
+    new TextEncoder().encode(data).byteLength > maxBytes
+  )
+    return null;
   try {
     const parsed: unknown = JSON.parse(data);
-    const result = rtcDataMessageSchema.safeParse(parsed);
+    const result = schema.safeParse(parsed);
     return result.success ? result.data : null;
   } catch {
     return null;

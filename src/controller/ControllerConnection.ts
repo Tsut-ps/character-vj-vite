@@ -10,9 +10,9 @@ import {
   type RemoteIceServers,
   type RemotePath,
   type RemotePermissions,
-} from "../app/remote/RemoteProtocol";
-import { WebSocketTransport, type RemoteTransport } from "../app/remote/WebSocketTransport";
-import { ControllerCommandSender } from "./ControllerCommandSender";
+} from "../app/remote/RemoteProtocol.ts";
+import { WebSocketTransport, type RemoteTransport } from "../app/remote/WebSocketTransport.ts";
+import { ControllerCommandSender } from "./ControllerCommandSender.ts";
 import { WebRtcController } from "./WebRtcController.ts";
 
 export interface ControllerConnectionEvents {
@@ -90,15 +90,10 @@ export class ControllerConnection {
     return this.commands.send(command);
   }
 
+  /** Controller sessionの接続資源を破棄する */
   destroy(): void {
     this.destroyed = true;
-    if (this.expiryTimer !== null) window.clearTimeout(this.expiryTimer);
-    if (this.readyTimer !== null) window.clearTimeout(this.readyTimer);
-    this.expiryTimer = null;
-    this.readyTimer = null;
-    this.transport?.close();
-    this.transport = null;
-    this.webRtc.close();
+    this.cleanupConnection();
   }
 
   private connect(roomId: string, sessionTicket: string): void {
@@ -133,31 +128,34 @@ export class ControllerConnection {
     this.readyTimer = window.setTimeout(() => this.endSession("Remote connection ticket expired"), remaining);
   }
 
+  /** terminal errorとしてsessionを終了する */
   private endSession(detail: string): void {
-    if (this.destroyed) return;
-    this.destroyed = true;
-    if (this.expiryTimer !== null) window.clearTimeout(this.expiryTimer);
-    if (this.readyTimer !== null) window.clearTimeout(this.readyTimer);
-    this.expiryTimer = null;
-    this.readyTimer = null;
-    this.transport?.close();
-    this.transport = null;
-    this.webRtc.close();
-    this.events.onStatus("error", detail);
+    this.finishSession("error", detail);
   }
 
+  /** 再JOINが必要な切断としてsessionを終了する */
   private disconnectSession(detail: string): void {
+    this.finishSession("disconnected", detail);
+  }
+
+  /** cleanup後に終了理由ごとのstatusを一度だけ通知する */
+  private finishSession(status: "error" | "disconnected", detail: string): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.cleanupConnection();
+    this.events.onStatus(status, detail);
+  }
+
+  /** session timerと全transportを同じ順序で解放する */
+  private cleanupConnection(): void {
     if (this.expiryTimer !== null) window.clearTimeout(this.expiryTimer);
     if (this.readyTimer !== null) window.clearTimeout(this.readyTimer);
     this.expiryTimer = null;
     this.readyTimer = null;
     const transport = this.transport;
     this.transport = null;
-    this.webRtc.close();
     transport?.close();
-    this.events.onStatus("disconnected", detail);
+    this.webRtc.close();
   }
 
   /** server stateをHost authorityとして適用する */

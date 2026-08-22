@@ -88,17 +88,18 @@ npm install
 npm run dev
 ```
 
-## 観客スマホ Remote（WebSocket Relay / WebRTC DIRECT）
+## 観客スマホ Remote（AUTO / DIRECT / TURN / WS RELAY）
 
-VJ Hostの `REMOTE` → `START REMOTE` で1時間のRemote sessionを開始し、`SHOW QR` から参加受付を開いて観客のスマートフォンをリモートコントローラーとして接続できます。標準はCloudflare WebSocket Relayで、HostとControllerの両方が手動選択した場合だけWebRTC DIRECTを使用します。TURNと自動fallbackはまだ含みません。
+VJ Hostの `REMOTE` → `START REMOTE` で1時間のRemote sessionを開始し、`SHOW QR` から参加受付を開いて観客のスマートフォンをリモートコントローラーとして接続できます。Hostが `AUTO`、`DIRECT`、`TURN`、`WS RELAY` から接続方式を選び、接続済みの全Controllerへ反映します。標準の `AUTO` はWS Relayですぐに操作可能な状態を保ちながらWebRTCへ接続し、DataChannel確立後にWebRTCへ切り替えます。WebRTCを利用できない場合はWS Relayを継続します。`TURN` はCloudflare Realtime TURNを使用します。
 
 ### Architecture
 
 ```text
 Controller UI
   → RemoteCommand + seq
+  → AUTO: WS RelayからWebRTCへupgrade、失敗時はWS fallback
+  → DIRECT / TURN: reliable ordered DataChannel → Host
   → WS RELAY: PartySocket → Room PartyServer → Host
-  → DIRECT: reliable ordered DataChannel → Host
   → RemoteInputAdapter
   → AppAction
   → VJApp / CueEngine
@@ -109,7 +110,7 @@ WebRTC signaling
   → Room PartyServer
 ```
 
-Cloudflare側はCueやBPM処理を持たず、WS RelayのRemoteCommandとWebRTC signalingを認証済み接続間で転送するだけです。Controller同士は接続せず、Hostと各Controllerの間に1本ずつPeerConnectionを作ります。どちらのtransportでも`RemoteInputAdapter`以降は同じ既存経路です。
+Cloudflare側はCueやBPM処理を持たず、WS RelayのRemoteCommandとWebRTC signalingを認証済み接続間で転送します。WebSocketは全modeでcontrol planeとして維持されます。Controller同士は接続せず、Hostと各Controllerの間に1本ずつPeerConnectionを作ります。どのtransportでも`RemoteInputAdapter`以降は同じ既存経路です。
 
 ### Security model
 
@@ -141,7 +142,7 @@ Cloudflare側はCueやBPM処理を持たず、WS RelayのRemoteCommandとWebRTC 
 
 Room作成APIは公開Frontendから利用するため、Origin制限とRate LimitだけではHost本人認証になりません。自動作成への追加防御が必要な運用では、Cloudflare TurnstileまたはAccessを別途導入してください。
 
-DIRECTはSTUNのみを使用するためNAT環境によって接続できません。接続失敗時はHostとControllerの両方で`WS RELAY`を手動選択してください。WebRTCでは接続相手へICE candidateのネットワーク情報が共有される点にも注意してください。
+DIRECTはSTUNのみを使用するためNAT環境によって接続できない場合があります。AUTOはWebRTCへ接続できなくてもWS Relayで操作を継続し、TURNはCloudflare Realtime TURNをrelayとして使用します。WebRTCでは接続相手へICE candidateのネットワーク情報が共有される点にも注意してください。
 
 ### Host permissions
 
@@ -283,7 +284,7 @@ npm run deploy
 10. Worker logでOrigin拒否、Rate limit、予期しないexceptionがないことを確認
 11. HostとControllerで`DIRECT`を選択し、`WebRTC CONNECTED`後に1〜9が動作することを確認
 12. DIRECTでCue hold中にpeerを切断し、Hostでholdが解放されることを確認
-13. DIRECT接続不可時に双方で`WS RELAY`を手動選択し、操作を継続できることを確認
+13. AUTOでWebRTC接続不可時も`WS RELAY`のまま操作を継続できることを確認
 
 ### Automated verification
 
@@ -309,7 +310,7 @@ Audience controllers join through the existing QR/Cloudflare Room flow. The Host
 - **AUTO**: commands can use WS Relay immediately while WebRTC negotiates in parallel. When the reliable ordered DataChannel opens, commands switch to WebRTC. ICE may select a direct candidate or TURN. If WebRTC is unavailable, WS Relay remains usable.
 - **DIRECT**: WebRTC with STUN only. No automatic relay fallback.
 - **TURN**: WebRTC with Cloudflare Realtime TURN and `iceTransportPolicy: "relay"`.
-- **WS RELAY**: the Phase 1 path, Controller → Durable Object → Host.
+- **WS RELAY**: WebSocket relay path, Controller → Durable Object → Host.
 
 The Cloudflare WebSocket remains connected in every mode as the control plane for Room/Auth, QR join state, permissions, controller presence, WebRTC signaling, and WS fallback. Controllers never create PeerConnections to each other; each controller connects only to the Host.
 

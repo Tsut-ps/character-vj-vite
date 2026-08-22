@@ -1,7 +1,11 @@
-import type { RemoteConnectionMode, RemotePath, RemotePermissions } from "../app/remote/RemoteProtocol";
-import { DEFAULT_REMOTE_PERMISSIONS } from "../app/remote/RemoteProtocol";
-import { ControllerConnection } from "./ControllerConnection";
-import { ControllerCueTracker } from "./ControllerCueTracker";
+import {
+  DEFAULT_REMOTE_PERMISSIONS,
+  type RemoteConnectionMode,
+  type RemotePath,
+  type RemotePermissions,
+} from "../app/remote/RemoteProtocol.ts";
+import { ControllerConnection } from "./ControllerConnection.ts";
+import { ControllerCueTracker } from "./ControllerCueTracker.ts";
 
 type ControllerStatus = "joining" | "connecting" | "connected" | "disconnected" | "error";
 
